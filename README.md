@@ -76,7 +76,28 @@ git submodule update --init --recursive
 
 ### 2. Build
 
-#### macOS (Apple Silicon) - TESTED ✅
+#### macOS (Apple Silicon & Intel) - TESTED ✅
+
+**Option 1: Automated Build Script (Recommended)**
+
+The build script automatically:
+- Detects your Mac architecture (ARM64 or Intel)
+- Checks for and installs ARM64 Homebrew (on Apple Silicon)
+- Validates mpv architecture and reinstalls if needed
+- Handles all dependencies and configuration
+
+```bash
+# Standard Release build (optimized, smaller binary)
+./build-macos.sh
+
+# Debug build (includes development features)
+BUILD_TYPE=Debug ./build-macos.sh
+
+# Universal Binary (Intel + ARM64, requires both architecture dependencies)
+UNIVERSAL_BINARY=yes ./build-macos.sh
+```
+
+**Option 2: Manual CMake Build**
 
 ```bash
 # Configure for ARM64 native build (Debug mode for full features)
@@ -91,16 +112,13 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 # The app bundle will be at: bin/OpenFunscripter.app
 ```
 
-#### macOS (Universal Binary - Intel + ARM64)
-
+For Universal Binary (Intel + ARM64):
 ```bash
-# Configure for universal binary
 cmake -B build \
   -DCMAKE_BUILD_TYPE=Debug \
   -DCMAKE_OSX_ARCHITECTURES="x86_64;arm64" \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
-# Build
 cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 
@@ -231,6 +249,29 @@ xattr -cr /Applications/OpenFunscripter.app
 **Note:** You only need to do this **once**. After the first launch, the app will open normally.
 
 ## Troubleshooting
+
+### macOS: Architecture Mismatch (mpv loading fails)
+
+**Symptom:** App runs but shows error: `Failed to load mpv library` or `incompatible architecture (have 'x86_64', need 'arm64')`
+
+**Cause:** You have Intel (x86_64) mpv installed on an Apple Silicon Mac, or vice versa.
+
+**Solution:**
+
+The `build-macos.sh` script automatically detects and fixes this issue. If you encounter this error:
+
+```bash
+# For Apple Silicon Macs - Install ARM64 mpv
+/opt/homebrew/bin/brew install mpv
+
+# For Intel Macs - Install x86_64 mpv
+/usr/local/bin/brew install mpv
+```
+
+Alternatively, rebuild as Universal Binary to support both architectures:
+```bash
+UNIVERSAL_BINARY=yes ./build-macos.sh
+```
 
 ### macOS: Missing video playback
 
