@@ -3,7 +3,8 @@
 	url = https://github.com/ocornut/imgui.git
 [submodule "lib/SDL2"]
 	path = lib/SDL2
-	url = https://github.com/libsdl-org/SDL.git
+	url = https://github.com/ack00gar/SDL2.git
+	branch = macos-arm64-fix
 [submodule "lib/json"]
 	path = lib/json
 	url = https://github.com/nlohmann/json.git
