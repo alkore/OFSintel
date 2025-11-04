@@ -78,15 +78,21 @@ git submodule update --init --recursive
 
 #### macOS (Apple Silicon & Intel) - TESTED ✅
 
-**Option 1: Automated Build Script (Recommended)**
+> **⚠️ IMPORTANT: Use the automated build script!** It prevents common build issues like CMake policy errors and mpv architecture mismatches.
+
+**Automated Build Script (Strongly Recommended)**
 
 The build script automatically:
 - Detects your Mac architecture (ARM64 or Intel)
 - Checks for and installs ARM64 Homebrew (on Apple Silicon)
 - Validates mpv architecture and reinstalls if needed
+- Fixes CMake policy compatibility issues
 - Handles all dependencies and configuration
 
 ```bash
+# Make the script executable (first time only)
+chmod +x build-macos.sh
+
 # Standard Release build (optimized, smaller binary)
 ./build-macos.sh
 
@@ -97,7 +103,11 @@ BUILD_TYPE=Debug ./build-macos.sh
 UNIVERSAL_BINARY=yes ./build-macos.sh
 ```
 
-**Option 2: Manual CMake Build**
+The binary will be at: `bin/OpenFunscripter.app`
+
+**Manual CMake Build (Advanced Users)**
+
+> **Note:** Manual building may require additional flags for CMake policy compatibility and doesn't include automatic dependency validation. If you encounter errors, use the automated build script instead.
 
 ```bash
 # Configure for ARM64 native build (Debug mode for full features)
@@ -112,6 +122,15 @@ cmake --build build -j$(sysctl -n hw.ncpu)
 # The app bundle will be at: bin/OpenFunscripter.app
 ```
 
+If you encounter CMake policy errors with submodules, add this flag:
+```bash
+cmake -B build \
+  -DCMAKE_BUILD_TYPE=Debug \
+  -DCMAKE_OSX_ARCHITECTURES=arm64 \
+  -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
+  -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+```
+
 For Universal Binary (Intel + ARM64):
 ```bash
 cmake -B build \
@@ -120,6 +139,15 @@ cmake -B build \
   -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
 
 cmake --build build -j$(sysctl -n hw.ncpu)
+```
+
+**Before building manually, ensure you have the correct mpv architecture:**
+```bash
+# On Apple Silicon (M1/M2/M3), use ARM64 Homebrew
+/opt/homebrew/bin/brew install mpv
+
+# On Intel Macs, use standard Homebrew
+/usr/local/bin/brew install mpv
 ```
 
 #### Windows - UNTESTED ⚠️
