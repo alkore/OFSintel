@@ -40,19 +40,27 @@ sudo dnf install gcc-c++ cmake git pkgconfig mpv-libs-devel mesa-libGL-devel
 sudo pacman -S base-devel cmake git pkgconf mpv mesa
 ```
 
+## Platform Support
+
+- ✅ **macOS (Apple Silicon & Intel)** - Fully tested and supported
+- ⚠️ **Windows** - Should work, but untested in this fork
+- ⚠️ **Linux** - Should work, but untested in this fork
+
+For Windows and Linux, follow the build instructions below. They should work as the codebase is cross-platform, but please report any issues you encounter.
+
 ## Building from Source
 
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/OFS-FunGen.git
-cd OFS-FunGen
+git clone https://github.com/ack00gar/OFS.git
+cd OFS
 git submodule update --init --recursive
 ```
 
 ### 2. Build
 
-#### macOS (Apple Silicon)
+#### macOS (Apple Silicon) - TESTED ✅
 
 ```bash
 # Configure for ARM64 native build (Debug mode for full features)
@@ -80,7 +88,7 @@ cmake -B build \
 cmake --build build -j$(sysctl -n hw.ncpu)
 ```
 
-#### Windows
+#### Windows - UNTESTED ⚠️
 
 ```bash
 # Configure
@@ -92,7 +100,9 @@ cmake --build build --config Debug -j%NUMBER_OF_PROCESSORS%
 # The executable will be at: bin\OpenFunscripter.exe
 ```
 
-#### Linux
+**Note:** Windows build is untested in this fork. The build should work as the original OFS supports Windows, but please report any issues.
+
+#### Linux - UNTESTED ⚠️
 
 ```bash
 # Configure
@@ -103,6 +113,8 @@ cmake --build build -j$(nproc)
 
 # The executable will be at: bin/OpenFunscripter
 ```
+
+**Note:** Linux build is untested in this fork. The build should work as the original OFS supports Linux, but please report any issues.
 
 ### 3. Install (Optional)
 
@@ -263,9 +275,3 @@ This project inherits the license from the original OpenFunscripter project.
 ## Credits
 
 - **Original OpenFunscripter**: [https://github.com/OpenFunscripter/OFS](https://github.com/OpenFunscripter/OFS)
-- **FunGen Edition Maintainer**: k00gar
-
-## Support
-
-For issues specific to FunGen Edition, please open an issue on this repository.
-For general OpenFunscripter questions, refer to the original project.
