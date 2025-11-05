@@ -89,7 +89,9 @@ if(WIN32)
          "${CMAKE_BINARY_DIR}/mpv-latest.json" SHOW_PROGRESS)
 
     file(READ "${CMAKE_BINARY_DIR}/mpv-latest.json" MPV_JSON)
-    string(REGEX MATCH "\"browser_download_url\"[^\"]*\"([^\"]*mpv-dev-x86_64-v3[^\"]*\\.7z)\"" _ ${MPV_JSON})
+    # Use standard x86_64 build (not v3) for better CPU compatibility
+    # v3 requires AVX2 and newer instruction sets that older CPUs don't have
+    string(REGEX MATCH "\"browser_download_url\"[^\"]*\"([^\"]*mpv-dev-x86_64-[0-9][^\"]*\\.7z)\"" _ ${MPV_JSON})
     set(MPV_DOWNLOAD_URL ${CMAKE_MATCH_1})
 
     if(MPV_DOWNLOAD_URL)
@@ -130,7 +132,7 @@ if(WIN32)
         message(FATAL_ERROR "Could not find libmpv-2.dll in extracted archive")
       endif()
     else()
-      message(FATAL_ERROR "Could not find mpv download URL. Please manually download mpv-dev-x86_64-v3-*.7z from https://github.com/zhongfly/mpv-winbuild/releases")
+      message(FATAL_ERROR "Could not find mpv download URL. Please manually download mpv-dev-x86_64-*.7z (NOT v3 variant) from https://github.com/zhongfly/mpv-winbuild/releases")
     endif()
   endif()
 
