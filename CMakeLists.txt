@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
 
+# CMake 4.x compatibility: Allow subprojects to use older minimum versions
+if(POLICY CMP0150)
+    cmake_policy(SET CMP0150 OLD)
+endif()
+
 project(scripter)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
