@@ -121,6 +121,15 @@ if(WIN32)
         message(STATUS "7zr.exe error: ${EXTRACT_ERROR}")
         message(FATAL_ERROR "Failed to extract mpv archive (exit code: ${EXTRACT_RESULT})")
       endif()
+
+      # Wait for Windows file system to catch up (antivirus, etc.)
+      message(STATUS "Waiting for extraction to complete...")
+      set(WAIT_COUNT 0)
+      while(NOT EXISTS "${CMAKE_BINARY_DIR}/libmpv-2.dll" AND WAIT_COUNT LESS 10)
+        execute_process(COMMAND ${CMAKE_COMMAND} -E sleep 1)
+        math(EXPR WAIT_COUNT "${WAIT_COUNT} + 1")
+      endwhile()
+
       # Find and copy libmpv-2.dll
       # The DLL should be extracted to the root of CMAKE_BINARY_DIR
       if(EXISTS "${CMAKE_BINARY_DIR}/libmpv-2.dll")
