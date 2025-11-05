@@ -5,6 +5,11 @@ if(POLICY CMP0150)
     cmake_policy(SET CMP0150 OLD)
 endif()
 
+# For CMake 4.x, set minimum policy version to allow older submodules
+if(NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)
+    set(CMAKE_POLICY_VERSION_MINIMUM 3.5)
+endif()
+
 project(scripter)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_SOURCE_DIR}/bin")
