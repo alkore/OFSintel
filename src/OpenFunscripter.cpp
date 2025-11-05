@@ -2726,11 +2726,12 @@ void OpenFunscripter::ShowAboutWindow(bool* open) noexcept
         // Try multiple paths for the logo
         std::vector<std::string> logoPaths = {
             Util::Prefpath("fungen_logo.png"),
-            Util::Resource("data/fungen_logo.png")
+            Util::Resource("fungen_logo.png")
         };
 
         int channels;
         for (const auto& logoPath : logoPaths) {
+            LOGF_INFO("Trying to load FunGen logo from: %s", logoPath.c_str());
             unsigned char* imageData = stbi_load(logoPath.c_str(), &fungenLogoWidth, &fungenLogoHeight, &channels, 4);
             if (imageData) {
                 glGenTextures(1, &fungenLogoTexture);
@@ -2739,12 +2740,14 @@ void OpenFunscripter::ShowAboutWindow(bool* open) noexcept
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, fungenLogoWidth, fungenLogoHeight, 0, GL_RGBA, GL_UNSIGNED_BYTE, imageData);
                 stbi_image_free(imageData);
-                LOGF_INFO("Loaded FunGen logo from: %s", logoPath.c_str());
+                LOGF_INFO("Successfully loaded FunGen logo from: %s", logoPath.c_str());
                 break;
+            } else {
+                LOGF_WARN("Failed to load FunGen logo from: %s", logoPath.c_str());
             }
         }
         if (fungenLogoTexture == 0) {
-            LOG_WARN("Failed to load FunGen logo from any path");
+            LOG_WARN("Failed to load FunGen logo from all attempted paths");
         }
     }
 
@@ -2786,7 +2789,7 @@ void OpenFunscripter::ShowAboutWindow(bool* open) noexcept
 
     // Custom build info
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.8f, 0.8f, 0.2f, 1.0f)); // Yellow
-    ImGui::TextUnformatted("Compiled by k00gar - Nov. 2024");
+    ImGui::TextUnformatted("FunGen Edition - Modified by k00gar - Nov. 2025");
     ImGui::PopStyleColor();
 
     ImGui::Spacing();
