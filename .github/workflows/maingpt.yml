@@ -1,4 +1,4 @@
-name: CMake (updated for macOS Intel via build-macos.sh)
+name: CMake (macOS Intel via build-macos.sh — fixed)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-15-intel   # force Intel (x86_64) runner
+    runs-on: macos-15-intel   # ✅ exécute sur machine Intel x86_64
     steps:
       - uses: actions/checkout@v4
         with:
@@ -28,17 +28,27 @@ jobs:
           brew update
           brew install cmake pkg-config mpv
 
+      - name: Clean previous builds
+        run: |
+          rm -rf build bin CMakeFiles CMakeCache.txt || true
+
       - name: Make script executable
         run: chmod +x ./build-macos.sh
 
-      # Tip: set UNIVERSAL_BINARY=yes to produce a fat binary (Intel+ARM)
-      - name: Build (Intel x86_64)
+      - name: Build (force Intel x86_64)
         env:
           BUILD_TYPE: ${{ env.BUILD_TYPE }}
+          CMAKE_OSX_ARCHITECTURES: x86_64
+          ARCHFLAGS: -arch x86_64
+          CMAKE_ARGS: "-DCMAKE_OSX_ARCHITECTURES=x86_64"
+          TARGET_ARCH: x86_64
         run: |
+          set -euo pipefail
+          export CMAKE_OSX_ARCHITECTURES="${CMAKE_OSX_ARCHITECTURES}"
+          export ARCHFLAGS="${ARCHFLAGS}"
+          export CMAKE_ARGS="${CMAKE_ARGS}"
+          export TARGET_ARCH="${TARGET_ARCH}"
           ./build-macos.sh
-          # Verify something was produced
-          (test -d bin/OpenFunscripter.app) || true
 
       - name: Locate app bundle
         shell: bash
@@ -46,8 +56,8 @@ jobs:
           set -euo pipefail
           APP_PATH="$(find . -type d -name 'OpenFunscripter.app' -print -quit || true)"
           if [ -z "$APP_PATH" ]; then
-            echo "OpenFunscripter.app introuvable. Arborescence courte :" >&2
-            (ls -la; echo "-----"; find . -maxdepth 3 -type d -print) >&2
+            echo "OpenFunscripter.app introuvable. Arborescence :" >&2
+            (ls -la; echo "-----"; find . -maxdepth 4 -type d -print) >&2
             exit 1
           fi
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
@@ -56,6 +66,7 @@ jobs:
       - name: Inspect binary arch (should be x86_64)
         run: |
           BIN="$APP_PATH/Contents/MacOS/OpenFunscripter"
+          echo "Inspecting $BIN"
           file "$BIN" || true
           otool -hv "$BIN" | head -n1 || true
 
