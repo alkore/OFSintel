@@ -1,4 +1,4 @@
-name: CMake (macOS Intel6 — full self-contained build with libmpv)
+name: CMake (macOS Intel7 — full self-contained build with libmpv)
 
 on:
   workflow_dispatch:
@@ -99,14 +99,15 @@ jobs:
           set -euo pipefail
           BIN_DIR="$APP_PATH/Contents/MacOS"
           REAL="$BIN_DIR/OpenFunscripter.real"
-          mv "$REAL" "$REAL" 2>/dev/null || true
           mv "$BIN_DIR/OpenFunscripter" "$REAL" || true
-          cat > "$BIN_DIR/OpenFunscripter" << 'EOF'
+
+          cat > "$BIN_DIR/OpenFunscripter" <<'SCRIPT'
 #!/bin/bash
 APPDIR="$(cd "$(dirname "$0")" && pwd)"
 export DYLD_FALLBACK_LIBRARY_PATH="$APPDIR/../Frameworks${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
 exec "$APPDIR/OpenFunscripter.real" "$@"
-EOF
+SCRIPT
+
           chmod +x "$BIN_DIR/OpenFunscripter"
 
       - name: Inspect Frameworks
