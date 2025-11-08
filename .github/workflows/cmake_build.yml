@@ -39,5 +39,5 @@ jobs:
     - uses: actions/upload-artifact@v4
       with:
         name: OFS-64x_${{github.sha}}.zip
-        path: ${{runner.workspace}}\OFS\bin\Release\*
+        path: ${{ github.workspace }}/bin
         retention-days: 14
