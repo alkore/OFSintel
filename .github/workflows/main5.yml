@@ -1,0 +1,228 @@
+name: CMake (macOS Intel — direct CMake + full vendoring mpv)
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  macos:
+    runs-on: macos-15-intel   # Intel x86_64 runner
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show architecture
+        run: |
+          echo "uname -m: $(uname -m)"
+          sysctl -n machdep.cpu.brand_string || true
+          sw_vers
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake pkg-config mpv
+
+      - name: Clean previous builds
+        run: rm -rf build bin CMakeFiles CMakeCache.txt || true
+
+      # === Configure/Build en x86_64 natif ===
+      - name: Configure CMake (Intel x86_64)
+        run: |
+          set -euo pipefail
+          HB_PREFIX="$(brew --prefix)"
+          echo "Homebrew prefix: $HB_PREFIX"
+          export PKG_CONFIG_PATH="$HB_PREFIX/lib/pkgconfig:$HB_PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_OSX_ARCHITECTURES=x86_64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build OFS (Intel)
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --target OpenFunscripter -j
+
+      # === Localiser l'app ===
+      - name: Locate app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build -type d -name 'OpenFunscripter.app' -print -quit || true)"
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH="$(find . -maxdepth 5 -type d -name 'OpenFunscripter.app' -print -quit || true)"
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "OpenFunscripter.app introuvable"; exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "Found: $APP_PATH"
+
+      # === Vendoring mpv + toutes ses deps Homebrew (pkg-config first, fallback brew) ===
+      - name: Vendor libmpv and ALL Homebrew deps into app
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          echo "🔎 APP_PATH=$APP_PATH"
+          echo "🔎 BREW_PREFIX=$BREW_PREFIX"
+
+          # 1) Trouver la vraie libmpv.*.dylib via pkg-config (prioritaire), sinon Homebrew
+          find_mpv() {
+            # a) pkg-config
+            if PKGDIR="$(pkg-config --variable=libdir mpv 2>/dev/null)"; then
+              for P in "$PKGDIR"/libmpv*.dylib; do
+                [ -f "$P" ] && echo "$P" && return 0
+              done
+            fi
+            # b) chemins Homebrew stables / réels
+            for P in \
+              "$BREW_PREFIX/opt/mpv/lib/libmpv.dylib" \
+              "$BREW_PREFIX/lib/libmpv.dylib" \
+              $(ls "$BREW_PREFIX"/lib/libmpv*.dylib 2>/dev/null || true) \
+              $(ls "$BREW_PREFIX"/Cellar/mpv/*/lib/libmpv*.dylib 2>/dev/null || true); do
+              [ -f "$P" ] && echo "$P" && return 0
+            done
+            return 1
+          }
+
+          MPV_CAND="$(find_mpv || true)"
+          if [ -z "$MPV_CAND" ]; then
+            echo "❌ libmpv introuvable via pkg-config et Homebrew."; exit 1
+          fi
+          MPV_REAL="$(stat -f %Y "$MPV_CAND" 2>/dev/null || echo "$MPV_CAND")"
+          echo "✅ Root dylib: $MPV_REAL"
+          otool -L "$MPV_REAL" || true
+
+          # 2) Helpers Bash (BFS vendoring)
+          queue=("$MPV_REAL")
+          copied_set=""
+
+          in_set() { case " $copied_set " in *" $1 "*) return 0;; *) return 1;; esac; }
+          add_set() { copied_set="$copied_set $1"; }
+
+          copy_if_needed() {
+            local SRC="$1"
+            local BASE="$(basename "$SRC")"
+            local TGT="$DEST/$BASE"
+            if [ ! -f "$TGT" ]; then
+              REAL="$(stat -f %Y "$SRC" 2>/dev/null || echo "$SRC")"
+              cp "$REAL" "$TGT"
+              chmod 644 "$TGT" || true
+              install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT"
+              echo "📦 Copied $BASE"
+            fi
+            echo "$TGT"
+          }
+
+          deps_of() {
+            # Dépendances qui pointent vers Homebrew (opt/, lib/, Cellar/)
+            otool -L "$1" \
+              | awk 'NR>1 {print $1}' \
+              | grep -E "^($BREW_PREFIX/(opt|lib|Cellar)/)" || true
+          }
+
+          relink_dep() {
+            local HOLDER="$1"
+            local OLD="$2"
+            local BASE="$(basename "$OLD")"
+            install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER"
+          }
+
+          # 3) BFS : copie et relink de toutes les dylibs Homebrew
+          while [ ${#queue[@]} -gt 0 ]; do
+            SRC="${queue[0]}"; queue=("${queue[@]:1}")
+            SRC_REAL="$(stat -f %Y "$SRC" 2>/dev/null || echo "$SRC")"
+            if in_set "$SRC_REAL"; then continue; fi
+            add_set "$SRC_REAL"
+
+            TGT="$(copy_if_needed "$SRC_REAL")"
+            echo "🔗 Relinking deps for $(basename "$TGT")"
+
+            while IFS= read -r DEP; do
+              [ -n "$DEP" ] || continue
+              echo "  - dep: $DEP"
+              relink_dep "$TGT" "$DEP"
+              case "$DEP" in
+                *.dylib)
+                  REAL="$(stat -f %Y "$DEP" 2>/dev/null || echo "$DEP")"
+                  queue+=("$REAL")
+                  ;;
+              esac
+            done < <(deps_of "$TGT")
+          done
+
+          # 4) L'exécutable principal pointe vers la libmpv copiée
+          MPV_BASE="$(basename "$MPV_REAL")"
+          install_name_tool -change "$MPV_REAL" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
+          echo "✅ Relinked main binary -> $MPV_BASE"
+
+          # 5) Échec si Frameworks vide (pour éviter faux positifs)
+          if [ -z "$(ls -A "$DEST" 2>/dev/null)" ]; then
+            echo "❌ Aucune dylib copiée dans Frameworks — vendoring a échoué."; exit 1
+          fi
+
+      - name: Verify & list Frameworks
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "📂 Listing $APP_PATH/Contents/Frameworks:"
+          ls -la "$APP_PATH/Contents/Frameworks" || true
+          echo ""
+          echo "🔎 Checking for Homebrew absolute paths..."
+          OFFENDERS=0
+          check_one() {
+            local F="$1"
+            if otool -L "$F" | awk 'NR>1{print $1}' | grep -q "^$(brew --prefix)/"; then
+              echo "❌ Still links to Homebrew: $F"
+              otool -L "$F" | awk 'NR>1{print $1}' | grep "^$(brew --prefix)/"
+              OFFENDERS=1
+            fi
+          }
+          check_one "$APP_PATH/Contents/MacOS/OpenFunscripter"
+          for F in "$APP_PATH/Contents/Frameworks/"*.dylib; do
+            [ -f "$F" ] && check_one "$F"
+          done
+          if [ $OFFENDERS -ne 0 ]; then
+            echo "Certaines libs pointent encore vers Homebrew — voir la liste ci-dessus."; exit 1
+          else
+            echo "✅ Aucun chemin Homebrew absolu restant. Bundle autonome."
+          fi
+
+      - name: Create launcher (set DYLD_FALLBACK_LIBRARY_PATH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_DIR="$APP_PATH/Contents/MacOS"
+          REAL="$BIN_DIR/OpenFunscripter.real"
+          mv "$BIN_DIR/OpenFunscripter" "$REAL"
+          {
+            echo '#!/bin/bash'
+            echo 'APPDIR="$(cd "$(dirname "$0")" && pwd)"'
+            echo 'export DYLD_FALLBACK_LIBRARY_PATH="$APPDIR/../Frameworks${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"'
+            echo 'exec "$APPDIR/OpenFunscripter.real" "$@"'
+          } > "$BIN_DIR/OpenFunscripter"
+          chmod +x "$BIN_DIR/OpenFunscripter"
+
+      - name: Inspect binary arch (should be x86_64)
+        run: |
+          BIN="$APP_PATH/Contents/MacOS/OpenFunscripter"
+          file "$BIN" || true
+          otool -hv "$BIN" | head -n1 || true
+
+      - name: Package app (zip)
+        run: ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "OpenFunscripter-macOS-Intel.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OFS-macOS-Intel
+          path: OpenFunscripter-macOS-Intel.zip
+          retention-days: 14
