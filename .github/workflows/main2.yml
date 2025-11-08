@@ -61,25 +61,40 @@ jobs:
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
           echo "Found: $APP_PATH"
 
-      - name: Vendor libmpv and ALL Homebrew deps into app (fixed-point)
+      - name: Vendor libmpv and ALL Homebrew deps into app (fixed-point, robust)
         run: |
           set -euo pipefail
           BREW_PREFIX="$(brew --prefix)"
-          BREW_LIB="$BREW_PREFIX/lib"
           DEST="$APP_PATH/Contents/Frameworks"
           mkdir -p "$DEST"
 
-          # 1) libmpv.*.dylib réelle (versionnée)
-          MPV_REAL="$(ls "$BREW_LIB"/libmpv*.dylib | grep -E 'libmpv\.[0-9]+\.dylib' | head -n1 || true)"
+          # --- Trouver la vraie libmpv.*.dylib (essaie opt/, lib/, puis Cellar/) ---
+          find_mpv() {
+            for P in \
+              "$BREW_PREFIX/opt/mpv/lib/libmpv.dylib" \
+              "$BREW_PREFIX/lib/libmpv.dylib" \
+              $(ls "$BREW_PREFIX"/lib/libmpv*.dylib 2>/dev/null || true) \
+              $(ls "$BREW_PREFIX"/Cellar/mpv/*/lib/libmpv*.dylib 2>/dev/null || true); do
+              [ -f "$P" ] && echo "$P" && return 0
+            done
+            return 1
+          }
+
+          MPV_REAL="$(find_mpv || true)"
           if [ -z "$MPV_REAL" ]; then
-            echo "❌ libmpv.*.dylib introuvable sous $BREW_LIB"; exit 1
+            echo "❌ libmpv introuvable dans opt/, lib/, ni Cellar/ sous $(brew --prefix)"; 
+            echo "Contenu indicatif :"; ls -la "$BREW_PREFIX/opt/mpv/lib" 2>/dev/null || true; 
+            ls -la "$BREW_PREFIX/lib" | grep -i libmpv || true; 
+            find "$BREW_PREFIX/Cellar/mpv" -name 'libmpv*.dylib' 2>/dev/null || true;
+            exit 1
           fi
+          # Résout symlink éventuel vers le binaire réel
+          MPV_REAL="$(stat -f %Y "$MPV_REAL" 2>/dev/null || echo "$MPV_REAL")"
           echo "Root dylib: $MPV_REAL"
 
-          # 2) Parcours BFS de toutes les deps Homebrew
+          # --- Helpers ---
           queue=("$MPV_REAL")
           copied_set=""
-
           in_set() { case " $copied_set " in *" $1 "*) return 0;; *) return 1;; esac; }
           add_set() { copied_set="$copied_set $1"; }
 
@@ -88,40 +103,43 @@ jobs:
             local BASE="$(basename "$SRC")"
             local TGT="$DEST/$BASE"
             if [ ! -f "$TGT" ]; then
-              # Résoudre les symlinks (ex: libavcodec.62.dylib -> libavcodec.62.xx.dylib)
               REAL="$(stat -f %Y "$SRC" 2>/dev/null || echo "$SRC")"
               cp "$REAL" "$TGT"
               chmod 644 "$TGT" || true
               install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT"
+              echo "📦 Copied $(basename "$TGT")"
             fi
             echo "$TGT"
           }
 
           deps_of() {
-            # Retourne les deps Homebrew (chemins absolus sous BREW_PREFIX)
-            otool -L "$1" | awk 'NR>1 {print $1}' | grep -E "^$BREW_PREFIX/" || true
+            # dépendances qui pointent vers Homebrew (opt/, lib/, Cellar/)
+            otool -L "$1" \
+              | awk 'NR>1 {print $1}' \
+              | grep -E "^($BREW_PREFIX/(opt|lib|Cellar)/)" || true
           }
 
           relink_dep() {
-            local HOLDER="$1"   # fichier à modifier
-            local OLD="$2"      # ancien chemin /usr/local/opt/.../*.dylib ou /opt/homebrew/...
+            local HOLDER="$1"   # fichier dans lequel on remplace
+            local OLD="$2"      # ancien chemin Homebrew absolu
             local BASE="$(basename "$OLD")"
             install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER"
           }
 
+          # --- BFS sur toutes les deps Homebrew (mpv -> ffmpeg -> glib -> pcre2, etc.) ---
           while [ ${#queue[@]} -gt 0 ]; do
             SRC="${queue[0]}"; queue=("${queue[@]:1}")
-            # Résoudre symlink pour le set
             SRC_REAL="$(stat -f %Y "$SRC" 2>/dev/null || echo "$SRC")"
             if in_set "$SRC_REAL"; then continue; fi
             add_set "$SRC_REAL"
 
             TGT="$(copy_if_needed "$SRC_REAL")"
 
-            # Pour chaque dep Homebrew de TGT : relinker + enfile la dep réelle
             while IFS= read -r DEP; do
               [ -n "$DEP" ] || continue
+              # relink dans le holder courant
               relink_dep "$TGT" "$DEP"
+              # si c'est une dylib Homebrew, on l'enfile (en résolvant le symlink)
               case "$DEP" in
                 *.dylib)
                   REAL="$(stat -f %Y "$DEP" 2>/dev/null || echo "$DEP")"
@@ -131,14 +149,17 @@ jobs:
             done < <(deps_of "$TGT")
           done
 
-          # 4) L'exécutable principal doit pointer vers la libmpv copiée
+          # L'exécutable principal pointe vers la libmpv copiée
           MPV_BASE="$(basename "$MPV_REAL")"
           install_name_tool -change "$MPV_REAL" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
 
-      - name: Verify no Homebrew paths remain (should be CLEAN)
+      - name: Verify & list Frameworks
         shell: bash
         run: |
           set -euo pipefail
+          echo "📂 Listing $APP_PATH/Contents/Frameworks:"
+          ls -la "$APP_PATH/Contents/Frameworks" || true
+
           OFFENDERS=0
           check_one() {
             local F="$1"
@@ -148,7 +169,6 @@ jobs:
               OFFENDERS=1
             fi
           }
-          # Vérifie l'exécutable et toutes les dylibs vendorisées
           check_one "$APP_PATH/Contents/MacOS/OpenFunscripter"
           for F in "$APP_PATH/Contents/Frameworks/"*.dylib; do
             [ -f "$F" ] && check_one "$F"
