@@ -12,7 +12,7 @@ jobs:
     runs-on: macos-15-intel
           
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v4
       with:
         submodules: 'recursive'
         fetch-depth: 0
@@ -36,7 +36,7 @@ jobs:
         cmake --build . --config $BUILD_TYPE --target "OpenFunscripter"
     
           
-    - uses: actions/upload-artifact@v3
+    - uses: actions/upload-artifact@v4
       with:
         name: OFS-64x_${{github.sha}}.zip
         path: ${{runner.workspace}}\OFS\bin\Release\*
