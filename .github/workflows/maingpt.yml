@@ -1,4 +1,4 @@
-name: CMake (macOS Intel via build-macos.sh — fixed)
+name: CMake (macOS Intel via build-macos.sh — fixed + embedded mpv)
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ env:
 
 jobs:
   macos:
-    runs-on: macos-15-intel   # ✅ exécute sur machine Intel x86_64
+    runs-on: macos-15-intel   # ✅ runner Intel natif (x86_64)
     steps:
       - uses: actions/checkout@v4
         with:
@@ -62,6 +62,24 @@ jobs:
           fi
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
           echo "Found: $APP_PATH"
+
+      - name: Embed libmpv into app
+        run: |
+          set -euo pipefail
+          BREW_LIB_PATH="$(brew --prefix)/lib"
+          # On cherche la version réelle
+          MPV_REAL="$(ls "$BREW_LIB_PATH"/libmpv*.dylib | grep -E 'libmpv\.[0-9]+\.dylib' | head -n1 || true)"
+          if [ -z "$MPV_REAL" ]; then
+            echo "⚠️ libmpv non trouvée dans $BREW_LIB_PATH"
+            exit 1
+          fi
+          echo "Embedding $MPV_REAL"
+          mkdir -p "$APP_PATH/Contents/Frameworks"
+          cp "$MPV_REAL" "$APP_PATH/Contents/Frameworks/"
+          BASENAME="$(basename "$MPV_REAL")"
+          install_name_tool -change "$MPV_REAL" \
+            "@executable_path/../Frameworks/$BASENAME" \
+            "$APP_PATH/Contents/MacOS/OpenFunscripter"
 
       - name: Inspect binary arch (should be x86_64)
         run: |
