@@ -1,0 +1,71 @@
+name: CMake (updated for macOS Intel via build-macos.sh)
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  macos:
+    runs-on: macos-15-intel   # force Intel (x86_64) runner
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show architecture
+        run: |
+          echo "uname -m: $(uname -m)"
+          sysctl -n machdep.cpu.brand_string || true
+          sw_vers
+
+      - name: Install dependencies
+        run: |
+          brew update
+          brew install cmake pkg-config mpv
+
+      - name: Make script executable
+        run: chmod +x ./build-macos.sh
+
+      # Tip: set UNIVERSAL_BINARY=yes to produce a fat binary (Intel+ARM)
+      - name: Build (Intel x86_64)
+        env:
+          BUILD_TYPE: ${{ env.BUILD_TYPE }}
+        run: |
+          ./build-macos.sh
+          # Verify something was produced
+          (test -d bin/OpenFunscripter.app) || true
+
+      - name: Locate app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find . -type d -name 'OpenFunscripter.app' -print -quit || true)"
+          if [ -z "$APP_PATH" ]; then
+            echo "OpenFunscripter.app introuvable. Arborescence courte :" >&2
+            (ls -la; echo "-----"; find . -maxdepth 3 -type d -print) >&2
+            exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "Found: $APP_PATH"
+
+      - name: Inspect binary arch (should be x86_64)
+        run: |
+          BIN="$APP_PATH/Contents/MacOS/OpenFunscripter"
+          file "$BIN" || true
+          otool -hv "$BIN" | head -n1 || true
+
+      - name: Package app (zip)
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "OpenFunscripter-macOS-Intel.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OFS-macOS-Intel
+          path: OpenFunscripter-macOS-Intel.zip
+          retention-days: 14
