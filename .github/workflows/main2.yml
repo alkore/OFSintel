@@ -102,7 +102,7 @@ jobs:
           echo "Found: $APP_PATH"
 
       # === Vendoring libmpv et TOUTES les deps Homebrew (BFS) ===
-      - name: Vendor libmpv and ALL Homebrew deps into app
+      - name: Vendor libmpv and ALL Homebrew deps into app (robust copy)
         shell: bash
         run: |
           set -euo pipefail
@@ -110,76 +110,66 @@ jobs:
           DEST="$APP_PATH/Contents/Frameworks"
           mkdir -p "$DEST"
 
-          if [ -z "${LIBMPV_PATH:-}" ] || [ ! -f "$LIBMPV_PATH" ]; then
-            echo "❌ LIBMPV_PATH absent. Étape précédente a échoué."
-            exit 1
-          fi
           echo "✅ Root dylib: $LIBMPV_PATH"
           otool -L "$LIBMPV_PATH" || true
 
           queue=("$LIBMPV_PATH")
-          copied_set=""
+          copied=()
 
-          in_set() { case " $copied_set " in *" $1 "*) return 0;; *) return 1;; esac; }
-          add_set() { copied_set="$copied_set $1"; }
-
-          copy_if_needed() {
+          copy_one() {
             local SRC="$1"
             local BASE="$(basename "$SRC")"
             local TGT="$DEST/$BASE"
-            if [ ! -f "$TGT" ]; then
-              REAL="$(stat -f %Y "$SRC" 2>/dev/null || echo "$SRC")"
-              cp "$REAL" "$TGT"
+            if [[ ! -f "$TGT" && -f "$SRC" ]]; then
+              echo "📦 Copying $(basename "$SRC")"
+              cp "$SRC" "$TGT"
               chmod 644 "$TGT" || true
               install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT"
-              echo "📦 Copied $BASE"
             fi
-            echo "$TGT"
           }
 
           deps_of() {
-            # Vendoriser uniquement les libs résidant sous Homebrew (opt/lib/Cellar)
-            otool -L "$1" \
-              | awk 'NR>1 {print $1}' \
-              | grep -E "^($(brew --prefix)/(opt|lib|Cellar)/)" || true
+            otool -L "$1" | awk 'NR>1 {print $1}' | grep -E "^/usr/local/(opt|Cellar|lib)/" || true
           }
 
-          relink_dep() {
+          relink() {
             local HOLDER="$1"
             local OLD="$2"
             local BASE="$(basename "$OLD")"
-            install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER"
+            if [[ -f "$HOLDER" ]]; then
+              install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER" || true
+            fi
           }
 
-          while [ ${#queue[@]} -gt 0 ]; do
+          while [[ ${#queue[@]} -gt 0 ]]; do
             SRC="${queue[0]}"; queue=("${queue[@]:1}")
-            SRC_REAL="$(stat -f %Y "$SRC" 2>/dev/null || echo "$SRC")"
-            if in_set "$SRC_REAL"; then continue; fi
-            add_set "$SRC_REAL"
+            [[ -f "$SRC" ]] || continue
+            if [[ " ${copied[*]} " == *" $SRC "* ]]; then continue; fi
+            copied+=("$SRC")
 
-            TGT="$(copy_if_needed "$SRC_REAL")"
-            echo "🔗 Relinking deps for $(basename "$TGT")"
+            copy_one "$SRC"
 
-            while IFS= read -r DEP; do
-              [ -n "$DEP" ] || continue
-              echo "  - dep: $DEP"
-              relink_dep "$TGT" "$DEP"
-              case "$DEP" in
-                *.dylib)
-                  REAL="$(stat -f %Y "$DEP" 2>/dev/null || echo "$DEP")"
-                  queue+=("$REAL")
-                  ;;
-              esac
-            done < <(deps_of "$TGT")
+            for D in $(deps_of "$SRC"); do
+              if [[ -f "$D" ]]; then
+                relink "$DEST/$(basename "$SRC")" "$D"
+                queue+=("$D")
+              fi
+            done
           done
 
+          # Relink main executable
           MPV_BASE="$(basename "$LIBMPV_PATH")"
           install_name_tool -change "$LIBMPV_PATH" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
-          echo "✅ Relinked main binary -> $MPV_BASE"
 
-          # Fail fast si rien
-          if [ -z "$(ls -A "$DEST" 2>/dev/null)" ]; then
-            echo "❌ Aucune dylib copiée dans Frameworks — vendoring a échoué."; exit 1
+          echo "📂 Final Frameworks content:"
+          ls -la "$DEST" || true
+
+          COUNT=$(ls "$DEST" | wc -l | tr -d ' ')
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "❌ Aucune dylib copiée dans Frameworks — vendoring a échoué."
+            exit 1
+          else
+            echo "✅ $COUNT fichiers copiés dans Frameworks."
           fi
 
       - name: Verify & list Frameworks
