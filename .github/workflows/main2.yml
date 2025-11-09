@@ -112,9 +112,9 @@ jobs:
           echo "✅ Root dylib: $LIBMPV_PATH"
           otool -L "$LIBMPV_PATH" || true
 
-          # Initialise les tableaux pour éviter "unbound variable"
+          # --- Initialisation ---
           queue=("$LIBMPV_PATH")
-          copied=()
+          declare -a copied=()
 
           copy_one() {
             local SRC="$1"
@@ -145,11 +145,16 @@ jobs:
             SRC="${queue[0]}"
             queue=("${queue[@]:1}")
             [[ -f "$SRC" ]] || continue
-            if [[ " ${copied[*]} " == *" $SRC "* ]]; then
+
+            # ⚙️ Désactivation temporaire du 'nounset' pour expansion sécurisée
+            set +u
+            if [[ " ${copied[*]-} " == *" $SRC "* ]]; then
+              set -u
               continue
             fi
-            copied+=("$SRC")
+            set -u
 
+            copied+=("$SRC")
             copy_one "$SRC"
 
             for D in $(deps_of "$SRC"); do
