@@ -389,10 +389,14 @@ jobs:
           DEST="$APP_PATH/Contents/Frameworks"
           mkdir -p "$DEST"
 
-          # Liste de départ: toutes les dylibs déjà présentes dans Frameworks
-          mapfile -t queue < <(find "$DEST" -type f -name "*.dylib" -maxdepth 1)
-          declare -a seen=()
+          # --- Initial queue: all dylibs already in Frameworks (bash 3 compatible) ---
+          queue=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && queue+=("$f")
+          done < <(find "$DEST" -maxdepth 1 -type f -name "*.dylib" 2>/dev/null || true)
 
+          # Seen set
+          seen=()
           in_seen() { local x="$1"; [[ " ${seen[*]-} " == *" $x "* ]]; }
           mark_seen() { seen+=("$1"); }
 
@@ -408,10 +412,10 @@ jobs:
             fi
           }
 
-          # Résout @rpath/@loader_path/@executable_path et chemins absolus
           get_rpaths() {
             otool -l "$1" | awk '$1=="cmd"&&$2=="LC_RPATH"{r=1;next} r&&$1=="path"{print $2;r=0}' || true
           }
+
           resolve_dep() {
             local HOLDER="$1"; local REF="$2"; local BASE="$(basename "$REF")"
             case "$REF" in
@@ -429,7 +433,7 @@ jobs:
                   local CAND="$RP/$BASE"
                   [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
                 done < <(get_rpaths "$HOLDER")
-                # fallback: Homebrew
+                # fallback Homebrew
                 local F; F="$(/usr/bin/find "$BREW_PREFIX" \( -path "$BREW_PREFIX/opt/*/lib" -o -path "$BREW_PREFIX/Cellar/*/lib" -o -path "$BREW_PREFIX/lib" \) -maxdepth 1 -name "$BASE" 2>/dev/null | head -n1 || true)"
                 [[ -n "$F" && -f "$F" ]] && { echo "$F"; return 0; } ;;
             esac
@@ -448,16 +452,20 @@ jobs:
             fi
           }
 
+          # BFS over all dylibs already in Frameworks
           while [[ ${#queue[@]} -gt 0 ]]; do
             ITEM="${queue[0]}"; queue=("${queue[@]:1}")
             [[ -f "$ITEM" ]] || continue
-            in_seen "$ITEM" && continue
+            set +u
+            if [[ " ${seen[*]-} " == *" $ITEM "* ]]; then
+              set -u
+              continue
+            fi
+            set -u
             mark_seen "$ITEM"
 
-            # Pour chaque dep référencée par ITEM
             while IFS= read -r REF; do
               [[ -z "$REF" ]] && continue
-              # ignorer les libs Apple systèmes
               case "$REF" in
                 /System/*|/usr/lib/*|/Library/Frameworks/*|/System/Library/*) continue ;;
               esac
@@ -465,12 +473,10 @@ jobs:
               REAL="$(resolve_dep "$ITEM" "$REF" || true)"
               [[ -z "$REAL" || ! -f "$REAL" ]] && continue
 
-              # Vendorise si c'est une lib Homebrew
               case "$REAL" in
                 "$BREW_PREFIX"/*)
                   copy_one "$REAL"
                   relink_to_bundle "$ITEM" "$REF"
-                  # enfile la nouvelle pour poursuivre son graphe
                   NEW="$DEST/$(basename "$REAL")"
                   queue+=("$NEW")
                   ;;
