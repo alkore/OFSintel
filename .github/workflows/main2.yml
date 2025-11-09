@@ -101,7 +101,6 @@ jobs:
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
           echo "Found: $APP_PATH"
 
-      # === Vendoring libmpv et TOUTES les deps Homebrew (BFS) ===
       - name: Vendor libmpv and ALL Homebrew deps into app (robust copy)
         shell: bash
         run: |
@@ -113,6 +112,7 @@ jobs:
           echo "✅ Root dylib: $LIBMPV_PATH"
           otool -L "$LIBMPV_PATH" || true
 
+          # Initialise les tableaux pour éviter "unbound variable"
           queue=("$LIBMPV_PATH")
           copied=()
 
@@ -142,9 +142,12 @@ jobs:
           }
 
           while [[ ${#queue[@]} -gt 0 ]]; do
-            SRC="${queue[0]}"; queue=("${queue[@]:1}")
+            SRC="${queue[0]}"
+            queue=("${queue[@]:1}")
             [[ -f "$SRC" ]] || continue
-            if [[ " ${copied[*]} " == *" $SRC "* ]]; then continue; fi
+            if [[ " ${copied[*]} " == *" $SRC "* ]]; then
+              continue
+            fi
             copied+=("$SRC")
 
             copy_one "$SRC"
@@ -157,7 +160,7 @@ jobs:
             done
           done
 
-          # Relink main executable
+          # Relink main executable vers la libmpv incluse
           MPV_BASE="$(basename "$LIBMPV_PATH")"
           install_name_tool -change "$LIBMPV_PATH" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
 
