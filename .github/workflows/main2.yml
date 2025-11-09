@@ -29,10 +29,70 @@ jobs:
         run: |
           set -euo pipefail
           brew update || true
-          # On installe explicitement mpv + ses libs usuelles
-          brew install cmake pkg-config ffmpeg mpv libass zimg glib pcre2 libplacebo || true
+          # Install mpv + typical deps; do NOT silence errors here
+          brew install cmake pkg-config ffmpeg libass zimg glib pcre2 libplacebo mpv || true
           echo "== Brew list =="
           brew list --versions ffmpeg mpv libass zimg glib pcre2 libplacebo || true
+
+      - name: Ensure libmpv present (reinstall/build-from-source if needed)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          echo "BREW_PREFIX=$BREW_PREFIX"
+
+          # Helper: try to locate libmpv in multiple places
+          find_libmpv() {
+            # via pkg-config (mpv or libmpv)
+            for pkg in mpv libmpv; do
+              if PKGDIR="$(pkg-config --variable=libdir "$pkg" 2>/dev/null)"; then
+                for P in "$PKGDIR"/libmpv*.dylib; do [ -f "$P" ] && echo "$P" && return 0; done
+              fi
+            done
+            # Homebrew "opt" and "lib"
+            for P in \
+              "$BREW_PREFIX/opt/mpv/lib/libmpv.dylib" \
+              "$BREW_PREFIX/lib/libmpv.dylib" \
+              $(ls "$BREW_PREFIX"/lib/libmpv*.dylib 2>/dev/null || true) ; do
+              [ -f "$P" ] && echo "$P" && return 0
+            done
+            # Homebrew Cellar real path
+            for P in $(ls "$BREW_PREFIX"/Cellar/mpv/*/lib/libmpv*.dylib 2>/dev/null || true); do
+              [ -f "$P" ] && echo "$P" && return 0
+            done
+            # As a last resort, inspect brew ls mpv file list
+            if brew ls -v mpv >/tmp/brew_ls_mpv.txt 2>/dev/null; then
+              awk '{print NF? $0: ""}' /tmp/brew_ls_mpv.txt | grep -E 'libmpv.*\.dylib$' || true
+            fi
+          }
+
+          LIBMPV_PATH="$(find_libmpv || true)"
+          if [ -z "$LIBMPV_PATH" ]; then
+            echo "libmpv not found after initial install. Forcing a reinstall from source..."
+            brew reinstall -s mpv
+            sleep 2
+            LIBMPV_PATH="$(find_libmpv || true)"
+          fi
+
+          echo "---- debug ----"
+          echo "brew --prefix mpv: $(brew --prefix mpv || true)"
+          brew info mpv || true
+          echo "Candidate LIBMPV_PATH: ${LIBMPV_PATH:-<none>}"
+          echo "Listing /usr/local/lib for libmpv:"
+          ls -la /usr/local/lib | grep -i libmpv || true
+          echo "Listing Cellar mpv lib folder:"
+          find "$(brew --prefix)/Cellar/mpv" -name 'libmpv*.dylib' 2>/dev/null || true
+          echo "----------------"
+
+          if [ -z "$LIBMPV_PATH" ] || [ ! -f "$LIBMPV_PATH" ]; then
+            echo "❌ libmpv*.dylib introuvable après (ré)installation Homebrew."
+            exit 1
+          fi
+
+          # Resolve symlink to the real file, export to env for next steps
+          LIBMPV_REAL="$(stat -f %Y "$LIBMPV_PATH" 2>/dev/null || echo "$LIBMPV_PATH")"
+          echo "LIBMPV_PATH=$LIBMPV_REAL" >> "$GITHUB_ENV"
+          echo "✅ Using LIBMPV_PATH=$LIBMPV_REAL"
 
       - name: Clean previous builds
         run: rm -rf build bin CMakeFiles CMakeCache.txt || true
@@ -76,38 +136,14 @@ jobs:
           DEST="$APP_PATH/Contents/Frameworks"
           mkdir -p "$DEST"
 
-          echo "🔎 APP_PATH=$APP_PATH"
-          echo "🔎 BREW_PREFIX=$BREW_PREFIX"
-
-          # 1) Trouver la vraie libmpv.*.dylib
-          find_mpv() {
-            # a) pkg-config si dispo
-            if PKGDIR="$(pkg-config --variable=libdir mpv 2>/dev/null)"; then
-              for P in "$PKGDIR"/libmpv*.dylib; do [ -f "$P" ] && echo "$P" && return 0; done
-            fi
-            # b) chemins Homebrew stables / réels
-            for P in \
-              "$BREW_PREFIX/opt/mpv/lib/libmpv.dylib" \
-              "$BREW_PREFIX/lib/libmpv.dylib" \
-              $(ls "$BREW_PREFIX"/lib/libmpv*.dylib 2>/dev/null || true) \
-              $(ls "$BREW_PREFIX"/Cellar/mpv/*/lib/libmpv*.dylib 2>/dev/null || true); do
-              [ -f "$P" ] && echo "$P" && return 0
-            done
-            return 1
-          }
-          MPV_CAND="$(find_mpv || true)"
-          if [ -z "$MPV_CAND" ]; then
-            echo "❌ libmpv introuvable via Homebrew. Liste indicative :"
-            ls -la "$BREW_PREFIX/opt/mpv" "$BREW_PREFIX/lib" 2>/dev/null || true
-            find "$BREW_PREFIX/Cellar/mpv" -name 'libmpv*.dylib' 2>/dev/null || true
+          if [ -z "${LIBMPV_PATH:-}" ] || [ ! -f "$LIBMPV_PATH" ]; then
+            echo "❌ LIBMPV_PATH absent. Étape précédente a échoué."
             exit 1
           fi
-          MPV_REAL="$(stat -f %Y "$MPV_CAND" 2>/dev/null || echo "$MPV_CAND")"
-          echo "✅ Root dylib: $MPV_REAL"
-          otool -L "$MPV_REAL" || true
+          echo "✅ Root dylib: $LIBMPV_PATH"
+          otool -L "$LIBMPV_PATH" || true
 
-          # 2) BFS pour copier et relinker toutes les deps Homebrew
-          queue=("$MPV_REAL")
+          queue=("$LIBMPV_PATH")
           copied_set=""
 
           in_set() { case " $copied_set " in *" $1 "*) return 0;; *) return 1;; esac; }
@@ -128,10 +164,10 @@ jobs:
           }
 
           deps_of() {
-            # On ne prend que les deps sous Homebrew (opt/, lib/, Cellar/) pour vendoriser
+            # Vendoriser uniquement les libs résidant sous Homebrew (opt/lib/Cellar)
             otool -L "$1" \
               | awk 'NR>1 {print $1}' \
-              | grep -E "^($BREW_PREFIX/(opt|lib|Cellar)/)" || true
+              | grep -E "^($(brew --prefix)/(opt|lib|Cellar)/)" || true
           }
 
           relink_dep() {
@@ -163,12 +199,11 @@ jobs:
             done < <(deps_of "$TGT")
           done
 
-          # 3) L'exécutable principal -> libmpv copiée
-          MPV_BASE="$(basename "$MPV_REAL")"
-          install_name_tool -change "$MPV_REAL" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
+          MPV_BASE="$(basename "$LIBMPV_PATH")"
+          install_name_tool -change "$LIBMPV_PATH" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
           echo "✅ Relinked main binary -> $MPV_BASE"
 
-          # 4) Fail fast si rien n'a été copié
+          # Fail fast si rien
           if [ -z "$(ls -A "$DEST" 2>/dev/null)" ]; then
             echo "❌ Aucune dylib copiée dans Frameworks — vendoring a échoué."; exit 1
           fi
