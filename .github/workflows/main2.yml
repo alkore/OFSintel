@@ -101,7 +101,7 @@ jobs:
           echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
           echo "Found: $APP_PATH"
 
-      - name: Vendor libmpv and ALL Homebrew deps into app (robust copy)
+      - name: Vendor libmpv and ALL Homebrew deps into app (robust copy + @rpath)
         shell: bash
         run: |
           set -euo pipefail
@@ -112,16 +112,67 @@ jobs:
           echo "✅ Root dylib: $LIBMPV_PATH"
           otool -L "$LIBMPV_PATH" || true
 
-          # --- Initialisation ---
-          queue=("$LIBMPV_PATH")
-          declare -a copied=()
+          # --- helpers ---
+          get_rpaths() {
+            # Liste les RPATH d'un binaire/dylib
+            otool -l "$1" | awk '
+              $1=="cmd" && $2=="LC_RPATH" {r=1; next}
+              r && $1=="path" {print $2; r=0}
+            ' || true
+          }
+
+          resolve_dep_path() {
+            # $1 = holder (fichier qui référence), $2 = dep (peut être absolu, @rpath/..., @loader_path/..., @executable_path/...)
+            local HOLDER="$1"
+            local DEP="$2"
+            local BASE="$(basename "$DEP")"
+
+            case "$DEP" in
+              /*)
+                # chemin absolu : si existe on le prend
+                [[ -f "$DEP" ]] && { echo "$DEP"; return 0; }
+                ;;
+              @loader_path/*)
+                local HP="$(dirname "$HOLDER")"
+                local CAND="${DEP/@loader_path/$HP}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                ;;
+              @executable_path/*)
+                # pour des deps référencées depuis l'exécutable
+                local EXE_DIR="$APP_PATH/Contents/MacOS"
+                local CAND="${DEP/@executable_path/$EXE_DIR}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                ;;
+              @rpath/*)
+                # essaie chaque RPATH du holder
+                while IFS= read -r RP; do
+                  [[ -z "$RP" ]] && continue
+                  local CAND="$RP/$BASE"
+                  [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                done < <(get_rpaths "$HOLDER")
+                # fallback: cherche sous Homebrew
+                local FOUND
+                FOUND="$(/usr/bin/find "$BREW_PREFIX" \( -path "$BREW_PREFIX/Cellar/*/lib" -o -path "$BREW_PREFIX/opt/*/lib" -o -path "$BREW_PREFIX/lib" \) -maxdepth 1 -name "$BASE" 2>/dev/null | head -n1 || true)"
+                [[ -n "$FOUND" && -f "$FOUND" ]] && { echo "$FOUND"; return 0; }
+                ;;
+            esac
+
+            # Dernier filet: cherche par nom partout sous Homebrew/lib
+            local ANY
+            ANY="$(/usr/bin/find "$BREW_PREFIX" -type f -name "$BASE" 2>/dev/null | head -n1 || true)"
+            [[ -n "$ANY" && -f "$ANY" ]] && { echo "$ANY"; return 0; }
+
+            # Rien trouvé
+            echo ""
+            return 1
+          }
 
           copy_one() {
             local SRC="$1"
             local BASE="$(basename "$SRC")"
             local TGT="$DEST/$BASE"
             if [[ ! -f "$TGT" && -f "$SRC" ]]; then
-              echo "📦 Copying $(basename "$SRC")"
+              echo "📦 Copying $BASE"
               cp "$SRC" "$TGT"
               chmod 644 "$TGT" || true
               install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT"
@@ -129,24 +180,28 @@ jobs:
           }
 
           deps_of() {
-            otool -L "$1" | awk 'NR>1 {print $1}' | grep -E "^/usr/local/(opt|Cellar|lib)/" || true
+            # Liste brute des deps (y compris @rpath / @loader_path / absolus)
+            otool -L "$1" | awk 'NR>1 {print $1}' || true
           }
 
           relink() {
             local HOLDER="$1"
-            local OLD="$2"
-            local BASE="$(basename "$OLD")"
+            local OLDREF="$2"
+            local BASE="$(basename "$OLDREF")"
             if [[ -f "$HOLDER" ]]; then
-              install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER" || true
+              install_name_tool -change "$OLDREF" "@executable_path/../Frameworks/$BASE" "$HOLDER" || true
             fi
           }
+
+          # --- BFS ---
+          queue=("$LIBMPV_PATH")
+          declare -a copied=()
 
           while [[ ${#queue[@]} -gt 0 ]]; do
             SRC="${queue[0]}"
             queue=("${queue[@]:1}")
             [[ -f "$SRC" ]] || continue
 
-            # ⚙️ Désactivation temporaire du 'nounset' pour expansion sécurisée
             set +u
             if [[ " ${copied[*]-} " == *" $SRC "* ]]; then
               set -u
@@ -157,15 +212,24 @@ jobs:
             copied+=("$SRC")
             copy_one "$SRC"
 
-            for D in $(deps_of "$SRC"); do
-              if [[ -f "$D" ]]; then
-                relink "$DEST/$(basename "$SRC")" "$D"
-                queue+=("$D")
+            # Pour chaque dep (absolue ou @rpath...), résout le vrai chemin, relink et enfile
+            while IFS= read -r REF; do
+              [[ -z "$REF" ]] && continue
+
+              # On ne vendorise pas les libs système Apple (/System,/usr/lib, frameworks…)
+              case "$REF" in
+                /System/*|/usr/lib/*|/Library/Frameworks/*|/System/Library/*) continue ;;
+              esac
+
+              REAL="$(resolve_dep_path "$SRC" "$REF" || true)"
+              if [[ -n "$REAL" && -f "$REAL" ]]; then
+                relink "$DEST/$(basename "$SRC")" "$REF"
+                queue+=("$REAL")
               fi
-            done
+            done < <(deps_of "$SRC")
           done
 
-          # Relink main executable vers la libmpv incluse
+          # Relink l’exécutable principal vers la libmpv copiée
           MPV_BASE="$(basename "$LIBMPV_PATH")"
           install_name_tool -change "$LIBMPV_PATH" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
 
