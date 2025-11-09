@@ -244,6 +244,47 @@ jobs:
             echo "✅ $COUNT fichiers copiés dans Frameworks."
           fi
 
+      - name: Ensure JPEG-XL & WebP libs are embedded (libjxl*, libjxl_cms*, libsharpyuv*, libwebp*)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          # Installe/assure les kegs qui portent ces libs
+          brew install jpeg-xl webp || true
+
+          copy_glob() {
+            local pattern="$1"
+            # copie toutes les occurrences trouvées (opt/, Cellar/, lib/)
+            /usr/bin/find "$BREW_PREFIX/opt" "$BREW_PREFIX/Cellar" "$BREW_PREFIX/lib" \
+              -maxdepth 4 -type f -name "$pattern" 2>/dev/null \
+            | while IFS= read -r f; do
+                [ -f "$f" ] || continue
+                b="$(basename "$f")"
+                if [ ! -f "$DEST/$b" ]; then
+                  echo "📦 Copying $b"
+                  cp "$f" "$DEST/$b"
+                  chmod 644 "$DEST/$b" || true
+                  install_name_tool -id "@executable_path/../Frameworks/$b" "$DEST/$b" || true
+                fi
+              done
+          }
+
+          # JPEG-XL
+          copy_glob "libjxl*.dylib"
+          copy_glob "libjxl_cms*.dylib"
+
+          # WebP (au cas où)
+          copy_glob "libsharpyuv*.dylib"
+          copy_glob "libwebp*.dylib"
+          copy_glob "libwebpmux*.dylib"
+          copy_glob "libwebpdemux*.dylib"
+
+          echo "📂 Frameworks after JXL/WebP ensure:"
+          ls -la "$DEST" | grep -E 'libjxl|libjxl_cms|libwebp|sharpyuv' || true
+
       - name: Force-copy libsharpyuv from webp keg (hard fail if missing)
         shell: bash
         run: |
@@ -282,6 +323,35 @@ jobs:
 
           echo "📂 Frameworks now contains:"
           ls -la "$DEST" | grep -E 'libsharpyuv|libwebp' || true
+
+      - name: Create ABI compatibility symlinks (*.MAJOR.dylib → *.MAJOR.MINOR.dylib)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$APP_PATH/Contents/Frameworks"
+          cd "$DEST"
+
+          make_link() {
+            local real="$1"       # ex: libsharpyuv.0.1.2.dylib
+            # extrait "base.MAJOR" -> libsharpyuv.0
+            local base="$(echo "$real" | sed -E 's/\.([0-9]+)\.([0-9]+)\.dylib$//')"   || true
+            local major="$(echo "$real" | sed -nE 's/.*\.([0-9]+)\.([0-9]+)\.dylib$/\1/p')" || true
+            [ -n "$base" ] && [ -n "$major" ] || return 0
+            local link="${base}.${major}.dylib"
+            if [ -f "$real" ] && [ ! -e "$link" ]; then
+              echo "🔗 ln -s $real  ->  $link"
+              ln -s "$real" "$link"
+            fi
+          }
+
+          # symlinks pour toutes les libs versionnées X.Y: lib*.MAJOR.MINOR.dylib
+          for f in lib*.[0-9]*.[0-9]*.dylib; do
+            [ -f "$f" ] || continue
+            make_link "$f"
+          done
+
+          echo "📂 After symlink pass:"
+          ls -la | grep -E 'libjxl|libjxl_cms|libwebp|sharpyuv' || true
 
       - name: Rewrite any remaining @rpath → Frameworks (all dylibs + exe)
         shell: bash
