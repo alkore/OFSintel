@@ -1,4 +1,4 @@
-name: CMake (macOS Intel19 — full self-contained build with libmpv)
+name: CMake (macOS Intel18 — full self-contained build with libmpv)
 
 on:
   workflow_dispatch:
@@ -44,16 +44,25 @@ jobs:
           set -euo pipefail
           git clone --depth=1 https://github.com/mpv-player/mpv.git
           cd mpv
-          # On compile UNIQUEMENT libmpv (pas le player)
+
+          # S'assurer que pkg-config voit les libs Homebrew
+          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+
+          # Configure: libmpv uniquement, player désactivé, options "feature" en 'disabled'
           meson setup build \
             --prefix=/usr/local \
-            -Dlibmpv=true \
-            -Dcplayer=false \
-            -Dswift-build=false \
-            -Djavascript=false
+            --buildtype=release \
+            -Dlibmpv=enabled \
+            -Dcplayer=disabled \
+            -Dswift-build=disabled \
+            -Djavascript=disabled \
+            -Dvulkan=disabled
+
+          meson configure -C build
           meson compile -C build
           sudo meson install -C build
-          echo "Installed files:"
+
+          echo "Installed files under /usr/local/lib:"
           ls -la /usr/local/lib | grep -E 'libmpv.*\.dylib' || true
 
       # === Configure and build OFS ===
