@@ -34,65 +34,38 @@ jobs:
           echo "== Brew list =="
           brew list --versions ffmpeg mpv libass zimg glib pcre2 libplacebo || true
 
-      - name: Ensure libmpv present (reinstall/build-from-source if needed)
+      - name: Ensure libmpv present (debug)
         shell: bash
         run: |
           set -euo pipefail
           BREW_PREFIX="$(brew --prefix)"
           echo "BREW_PREFIX=$BREW_PREFIX"
 
-          # Helper: try to locate libmpv in multiple places
-          find_libmpv() {
-            # via pkg-config (mpv or libmpv)
-            for pkg in mpv libmpv; do
-              if PKGDIR="$(pkg-config --variable=libdir "$pkg" 2>/dev/null)"; then
-                for P in "$PKGDIR"/libmpv*.dylib; do [ -f "$P" ] && echo "$P" && return 0; done
-              fi
-            done
-            # Homebrew "opt" and "lib"
-            for P in \
-              "$BREW_PREFIX/opt/mpv/lib/libmpv.dylib" \
-              "$BREW_PREFIX/lib/libmpv.dylib" \
-              $(ls "$BREW_PREFIX"/lib/libmpv*.dylib 2>/dev/null || true) ; do
-              [ -f "$P" ] && echo "$P" && return 0
-            done
-            # Homebrew Cellar real path
-            for P in $(ls "$BREW_PREFIX"/Cellar/mpv/*/lib/libmpv*.dylib 2>/dev/null || true); do
-              [ -f "$P" ] && echo "$P" && return 0
-            done
-            # As a last resort, inspect brew ls mpv file list
-            if brew ls -v mpv >/tmp/brew_ls_mpv.txt 2>/dev/null; then
-              awk '{print NF? $0: ""}' /tmp/brew_ls_mpv.txt | grep -E 'libmpv.*\.dylib$' || true
-            fi
-          }
+          echo "Listing possible mpv libs:"
+          ls -la "$BREW_PREFIX/opt/mpv/lib" 2>/dev/null || true
+          ls -la "$BREW_PREFIX/lib/libmpv*" 2>/dev/null || true
+          ls -la "$BREW_PREFIX/Cellar/mpv"*/lib/libmpv*.dylib 2>/dev/null || true
 
-          LIBMPV_PATH="$(find_libmpv || true)"
+          # Find .dylib
+          LIBMPV_PATH="$(find "$BREW_PREFIX/Cellar/mpv" -type f -name 'libmpv*.dylib' 2>/dev/null | head -n1 || true)"
           if [ -z "$LIBMPV_PATH" ]; then
-            echo "libmpv not found after initial install. Forcing a reinstall from source..."
-            brew reinstall -s mpv
-            sleep 2
-            LIBMPV_PATH="$(find_libmpv || true)"
+            # Try opt/lib
+            LIBMPV_PATH="$(ls "$BREW_PREFIX/opt/mpv/lib/libmpv*.dylib" 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$LIBMPV_PATH" ]; then
+            LIBMPV_PATH="$(ls "$BREW_PREFIX/lib/libmpv*.dylib" 2>/dev/null | head -n1 || true)"
           fi
 
-          echo "---- debug ----"
-          echo "brew --prefix mpv: $(brew --prefix mpv || true)"
-          brew info mpv || true
-          echo "Candidate LIBMPV_PATH: ${LIBMPV_PATH:-<none>}"
-          echo "Listing /usr/local/lib for libmpv:"
-          ls -la /usr/local/lib | grep -i libmpv || true
-          echo "Listing Cellar mpv lib folder:"
-          find "$(brew --prefix)/Cellar/mpv" -name 'libmpv*.dylib' 2>/dev/null || true
-          echo "----------------"
+          echo "Candidate LIBMPV_PATH = '${LIBMPV_PATH:-<none>}'"
 
           if [ -z "$LIBMPV_PATH" ] || [ ! -f "$LIBMPV_PATH" ]; then
-            echo "❌ libmpv*.dylib introuvable après (ré)installation Homebrew."
+            echo "❌ libmpv*.dylib introuvable après debug listing."
             exit 1
           fi
 
-          # Resolve symlink to the real file, export to env for next steps
           LIBMPV_REAL="$(stat -f %Y "$LIBMPV_PATH" 2>/dev/null || echo "$LIBMPV_PATH")"
-          echo "LIBMPV_PATH=$LIBMPV_REAL" >> "$GITHUB_ENV"
           echo "✅ Using LIBMPV_PATH=$LIBMPV_REAL"
+          echo "LIBMPV_PATH=$LIBMPV_REAL" >> "$GITHUB_ENV"
 
       - name: Clean previous builds
         run: rm -rf build bin CMakeFiles CMakeCache.txt || true
