@@ -1,4 +1,4 @@
-name: CMake (macOS Intel9 — full self-contained build with libmpv)
+name: CMake (macOS Intel19 — full self-contained build with libmpv)
 
 on:
   workflow_dispatch:
@@ -29,7 +29,7 @@ jobs:
         run: |
           set -euo pipefail
           brew update || true
-          brew install cmake pkg-config python@3.11 ninja ffmpeg libass || true
+          brew install cmake pkg-config python@3.11 ninja meson ffmpeg libass zimg || true
 
       - name: Verify dependencies
         shell: bash
@@ -38,18 +38,23 @@ jobs:
           brew list --versions ffmpeg mpv || echo "⚠️ Paquets non listés"
           ls -la /usr/local/lib | grep libmpv || echo "⚠️ libmpv introuvable"
 
-      # === Build libmpv from source (Intel) ===
-      - name: Build libmpv (Intel)
+      - name: Build libmpv (Intel, Meson)
         shell: bash
         run: |
           set -euo pipefail
           git clone --depth=1 https://github.com/mpv-player/mpv.git
           cd mpv
-          mkdir build
-          python3 ./waf configure --prefix=/usr/local --enable-libmpv-shared --disable-vulkan
-          python3 ./waf build
-          sudo python3 ./waf install
-          ls -la /usr/local/lib | grep libmpv || true
+          # On compile UNIQUEMENT libmpv (pas le player)
+          meson setup build \
+            --prefix=/usr/local \
+            -Dlibmpv=true \
+            -Dcplayer=false \
+            -Dswift-build=false \
+            -Djavascript=false
+          meson compile -C build
+          sudo meson install -C build
+          echo "Installed files:"
+          ls -la /usr/local/lib | grep -E 'libmpv.*\.dylib' || true
 
       # === Configure and build OFS ===
       - name: Configure OFS (x86_64)
