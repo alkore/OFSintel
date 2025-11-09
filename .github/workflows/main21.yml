@@ -1,4 +1,4 @@
-name: CMake (macOS Intel18 — full self-contained build with libmpv)
+name: CMake (macOS Intel21 — full self-contained build with libmpv)
 
 on:
   workflow_dispatch:
@@ -48,17 +48,15 @@ jobs:
           # S'assurer que pkg-config voit les libs Homebrew
           export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-          # Configure: libmpv uniquement, player désactivé, options "feature" en 'disabled'
           meson setup build \
             --prefix=/usr/local \
             --buildtype=release \
-            -Dlibmpv=enabled \
-            -Dcplayer=disabled \
+            -Dlibmpv=true \
+            -Dcplayer=false \
             -Dswift-build=disabled \
             -Djavascript=disabled \
             -Dvulkan=disabled
 
-          meson configure -C build
           meson compile -C build
           sudo meson install -C build
 
