@@ -1,4 +1,4 @@
-name: CMake (macOS Intel8 — full self-contained build with libmpv)
+name: CMake (macOS Intel9 — full self-contained build with libmpv)
 
 on:
   workflow_dispatch:
@@ -25,9 +25,18 @@ jobs:
           sw_vers
 
       - name: Install base dependencies
+        shell: bash
         run: |
-          brew update
-          brew install cmake pkg-config python@3.11 ninja ffmpeg libass
+          set -euo pipefail
+          brew update || true
+          brew install cmake pkg-config python@3.11 ninja ffmpeg libass || true
+
+      - name: Verify dependencies
+        shell: bash
+        run: |
+          which ffmpeg || echo "⚠️ ffmpeg introuvable"
+          brew list --versions ffmpeg mpv || echo "⚠️ Paquets non listés"
+          ls -la /usr/local/lib | grep libmpv || echo "⚠️ libmpv introuvable"
 
       # === Build libmpv from source (Intel) ===
       - name: Build libmpv (Intel)
