@@ -45,9 +45,11 @@ jobs:
           git clone --depth=1 https://github.com/mpv-player/mpv.git
           cd mpv
 
-          # S'assurer que pkg-config voit les libs Homebrew
-          export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+          # S'assurer que pkg-config voit les .pc Homebrew (ffmpeg, etc.)
+          BREW_PREFIX="$(brew --prefix)"
+          export PKG_CONFIG_PATH="$BREW_PREFIX/lib/pkgconfig:$BREW_PREFIX/share/pkgconfig:/usr/local/lib/pkgconfig:/usr/local/share/pkgconfig:${PKG_CONFIG_PATH:-}"
 
+          # libmpv only, player off; désactive libplacebo pour éviter la dépendance
           meson setup build \
             --prefix=/usr/local \
             --buildtype=release \
@@ -55,7 +57,8 @@ jobs:
             -Dcplayer=false \
             -Dswift-build=disabled \
             -Djavascript=disabled \
-            -Dvulkan=disabled
+            -Dvulkan=disabled \
+            -Dlibplacebo=disabled
 
           meson compile -C build
           sudo meson install -C build
