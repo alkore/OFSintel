@@ -63,7 +63,8 @@ jobs:
             exit 1
           fi
 
-          LIBMPV_REAL="$(stat -f %Y "$LIBMPV_PATH" 2>/dev/null || echo "$LIBMPV_PATH")"
+          # ✅ Correction : pas de 'stat' ici, on garde le chemin brut
+          LIBMPV_REAL="$LIBMPV_PATH"
           echo "✅ Using LIBMPV_PATH=$LIBMPV_REAL"
           echo "LIBMPV_PATH=$LIBMPV_REAL" >> "$GITHUB_ENV"
 
