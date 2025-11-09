@@ -244,6 +244,42 @@ jobs:
             echo "✅ $COUNT fichiers copiés dans Frameworks."
           fi
 
+      - name: Ensure WebP libs (libwebp*, libsharpyuv*) are embedded
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          # Installe webp si besoin (contient libwebp* et libsharpyuv*)
+          brew install webp || true
+
+          copy_if_missing() {
+            local pattern="$1"
+            local found=""
+            # Si déjà présent, rien à faire
+            if ls "$DEST"/$pattern 1>/dev/null 2>&1; then
+              return 0
+            fi
+            # Cherche dans opt/, Cellar/, et lib/
+            found="$(/usr/bin/find "$BREW_PREFIX/opt" "$BREW_PREFIX/Cellar" "$BREW_PREFIX/lib" -maxdepth 3 -type f -name "$pattern" 2>/dev/null | head -n1 || true)"
+            if [ -n "$found" ] && [ -f "$found" ]; then
+              echo "📦 Copying $(basename "$found")"
+              cp "$found" "$DEST/"
+              chmod 644 "$DEST/$(basename "$found")" || true
+              install_name_tool -id "@executable_path/../Frameworks/$(basename "$found")" "$DEST/$(basename "$found")" || true
+            fi
+          }
+
+          # libsharpyuv + famille webp (au cas où)
+          copy_if_missing "libsharpyuv*.dylib"
+          copy_if_missing "libwebp*.dylib"
+          copy_if_missing "libwebpmux*.dylib"
+
+          echo "📂 Frameworks after WebP ensure:"
+          ls -la "$DEST" || true
+
       - name: Verify & list Frameworks
         shell: bash
         run: |
