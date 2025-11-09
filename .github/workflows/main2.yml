@@ -244,7 +244,7 @@ jobs:
             echo "✅ $COUNT fichiers copiés dans Frameworks."
           fi
 
-      - name: Ensure WebP libs (libwebp*, libsharpyuv*) are embedded
+      - name: Force-copy libsharpyuv from webp keg (hard fail if missing)
         shell: bash
         run: |
           set -euo pipefail
@@ -252,33 +252,64 @@ jobs:
           DEST="$APP_PATH/Contents/Frameworks"
           mkdir -p "$DEST"
 
-          # Installe webp si besoin (contient libwebp* et libsharpyuv*)
-          brew install webp || true
+          echo "🔎 webp prefix: $(brew --prefix webp || true)"
+          echo "🔎 Listing webp lib dir:"
+          ls -la "$(brew --prefix webp)/lib" 2>/dev/null || true
 
-          copy_if_missing() {
-            local pattern="$1"
-            local found=""
-            # Si déjà présent, rien à faire
-            if ls "$DEST"/$pattern 1>/dev/null 2>&1; then
-              return 0
-            fi
-            # Cherche dans opt/, Cellar/, et lib/
-            found="$(/usr/bin/find "$BREW_PREFIX/opt" "$BREW_PREFIX/Cellar" "$BREW_PREFIX/lib" -maxdepth 3 -type f -name "$pattern" 2>/dev/null | head -n1 || true)"
-            if [ -n "$found" ] && [ -f "$found" ]; then
-              echo "📦 Copying $(basename "$found")"
-              cp "$found" "$DEST/"
-              chmod 644 "$DEST/$(basename "$found")" || true
-              install_name_tool -id "@executable_path/../Frameworks/$(basename "$found")" "$DEST/$(basename "$found")" || true
-            fi
+          # Cherche libsharpyuv*.dylib en priorité dans le keg webp, sinon partout sous Homebrew
+          SHARPY="$(/usr/bin/find "$(brew --prefix webp)/lib" -maxdepth 1 -type f -name 'libsharpyuv*.dylib' 2>/dev/null | head -n1 || true)"
+          if [ -z "$SHARPY" ]; then
+            SHARPY="$(/usr/bin/find "$BREW_PREFIX" -type f -name 'libsharpyuv*.dylib' 2>/dev/null | head -n1 || true)"
+          fi
+
+          echo "Candidate libsharpyuv: ${SHARPY:-<none>}"
+          if [ -z "$SHARPY" ] || [ ! -f "$SHARPY" ]; then
+            echo "❌ libsharpyuv introuvable. Essaye: brew reinstall webp"
+            brew reinstall webp
+            SHARPY="$(/usr/bin/find "$(brew --prefix webp)/lib" -maxdepth 1 -type f -name 'libsharpyuv*.dylib' 2>/dev/null | head -n1 || true)"
+          fi
+
+          if [ -z "$SHARPY" ] || [ ! -f "$SHARPY" ]; then
+            echo "❌ Impossible de localiser libsharpyuv*.dylib après réinstall webp."
+            exit 1
+          fi
+
+          BASENAME="$(basename "$SHARPY")"
+          echo "📦 Copying $BASENAME"
+          cp "$SHARPY" "$DEST/$BASENAME"
+          chmod 644 "$DEST/$BASENAME" || true
+          install_name_tool -id "@executable_path/../Frameworks/$BASENAME" "$DEST/$BASENAME" || true
+
+          echo "📂 Frameworks now contains:"
+          ls -la "$DEST" | grep -E 'libsharpyuv|libwebp' || true
+
+      - name: Rewrite any remaining @rpath → Frameworks (all dylibs + exe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$APP_PATH/Contents/Frameworks"
+
+          fix_one() {
+            local HOLDER="$1"
+            # Réécrit toute ref @rpath/<lib> -> @executable_path/../Frameworks/<lib>
+            while IFS= read -r REF; do
+              [ -z "$REF" ] && continue
+              base="$(basename "$REF")"
+              if [ -f "$DEST/$base" ]; then
+                echo "🔧 $(basename "$HOLDER"): @rpath → $base"
+                install_name_tool -change "$REF" "@executable_path/../Frameworks/$base" "$HOLDER" || true
+              fi
+            done < <(otool -L "$HOLDER" | awk 'NR>1{print $1}' | grep '^@rpath/' || true)
           }
 
-          # libsharpyuv + famille webp (au cas où)
-          copy_if_missing "libsharpyuv*.dylib"
-          copy_if_missing "libwebp*.dylib"
-          copy_if_missing "libwebpmux*.dylib"
+          # Corrige toutes les dylibs vendorisées
+          for F in "$DEST"/*.dylib; do
+            [ -f "$F" ] && fix_one "$F"
+          done
+          # Et l’exécutable principal
+          fix_one "$APP_PATH/Contents/MacOS/OpenFunscripter"
 
-          echo "📂 Frameworks after WebP ensure:"
-          ls -la "$DEST" || true
+          echo "✅ @rpath cleaned."
 
       - name: Verify & list Frameworks
         shell: bash
