@@ -381,6 +381,165 @@ jobs:
 
           echo "✅ @rpath cleaned."
 
+      - name: Close over all Frameworks deps (BFS on every dylib)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          # Liste de départ: toutes les dylibs déjà présentes dans Frameworks
+          mapfile -t queue < <(find "$DEST" -type f -name "*.dylib" -maxdepth 1)
+          declare -a seen=()
+
+          in_seen() { local x="$1"; [[ " ${seen[*]-} " == *" $x "* ]]; }
+          mark_seen() { seen+=("$1"); }
+
+          copy_one() {
+            local SRC="$1"
+            local BASE="$(basename "$SRC")"
+            local TGT="$DEST/$BASE"
+            if [[ ! -f "$TGT" && -f "$SRC" ]]; then
+              echo "📦 Copying $BASE"
+              cp "$SRC" "$TGT"
+              chmod 644 "$TGT" || true
+              install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT" || true
+            fi
+          }
+
+          # Résout @rpath/@loader_path/@executable_path et chemins absolus
+          get_rpaths() {
+            otool -l "$1" | awk '$1=="cmd"&&$2=="LC_RPATH"{r=1;next} r&&$1=="path"{print $2;r=0}' || true
+          }
+          resolve_dep() {
+            local HOLDER="$1"; local REF="$2"; local BASE="$(basename "$REF")"
+            case "$REF" in
+              /*)
+                [[ -f "$REF" ]] && { echo "$REF"; return 0; } ;;
+              @loader_path/*)
+                local HP="$(dirname "$HOLDER")"; local CAND="${REF/@loader_path/$HP}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; } ;;
+              @executable_path/*)
+                local EXE="$APP_PATH/Contents/MacOS"; local CAND="${REF/@executable_path/$EXE}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; } ;;
+              @rpath/*)
+                while IFS= read -r RP; do
+                  [[ -z "$RP" ]] && continue
+                  local CAND="$RP/$BASE"
+                  [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                done < <(get_rpaths "$HOLDER")
+                # fallback: Homebrew
+                local F; F="$(/usr/bin/find "$BREW_PREFIX" \( -path "$BREW_PREFIX/opt/*/lib" -o -path "$BREW_PREFIX/Cellar/*/lib" -o -path "$BREW_PREFIX/lib" \) -maxdepth 1 -name "$BASE" 2>/dev/null | head -n1 || true)"
+                [[ -n "$F" && -f "$F" ]] && { echo "$F"; return 0; } ;;
+            esac
+            # dernier filet: recherche globale sous Homebrew
+            local ANY; ANY="$(/usr/bin/find "$BREW_PREFIX" -type f -name "$BASE" 2>/dev/null | head -n1 || true)"
+            [[ -n "$ANY" && -f "$ANY" ]] && { echo "$ANY"; return 0; }
+            echo ""; return 1
+          }
+
+          deps_of() { otool -L "$1" | awk 'NR>1{print $1}'; }
+
+          relink_to_bundle() {
+            local HOLDER="$1"; local OLD="$2"; local BASE="$(basename "$OLD")"
+            if [[ -f "$HOLDER" ]]; then
+              install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER" || true
+            fi
+          }
+
+          while [[ ${#queue[@]} -gt 0 ]]; do
+            ITEM="${queue[0]}"; queue=("${queue[@]:1}")
+            [[ -f "$ITEM" ]] || continue
+            in_seen "$ITEM" && continue
+            mark_seen "$ITEM"
+
+            # Pour chaque dep référencée par ITEM
+            while IFS= read -r REF; do
+              [[ -z "$REF" ]] && continue
+              # ignorer les libs Apple systèmes
+              case "$REF" in
+                /System/*|/usr/lib/*|/Library/Frameworks/*|/System/Library/*) continue ;;
+              esac
+
+              REAL="$(resolve_dep "$ITEM" "$REF" || true)"
+              [[ -z "$REAL" || ! -f "$REAL" ]] && continue
+
+              # Vendorise si c'est une lib Homebrew
+              case "$REAL" in
+                "$BREW_PREFIX"/*)
+                  copy_one "$REAL"
+                  relink_to_bundle "$ITEM" "$REF"
+                  # enfile la nouvelle pour poursuivre son graphe
+                  NEW="$DEST/$(basename "$REAL")"
+                  queue+=("$NEW")
+                  ;;
+              esac
+            done < <(deps_of "$ITEM")
+          done
+
+          echo "📂 Frameworks after close-over pass:"
+          ls -la "$DEST" || true
+
+      - name: Force-fix known JXL deps (lcms2, highway, brotli) to bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$APP_PATH/Contents/Frameworks"
+          BREW_PREFIX="$(brew --prefix)"
+
+          # Vendorise explicitement ces libs si absentes
+          ensure() {
+            local name="$1" # ex: liblcms2.2.dylib
+            local found=""
+            if [ ! -f "$DEST/$name" ]; then
+              found="$(/usr/bin/find "$BREW_PREFIX" -type f -name "$name" 2>/dev/null | head -n1 || true)"
+              if [ -n "$found" ]; then
+                echo "📦 Copying $name"
+                cp "$found" "$DEST/$name"
+                chmod 644 "$DEST/$name" || true
+                install_name_tool -id "@executable_path/../Frameworks/$name" "$DEST/$name" || true
+              fi
+            fi
+          }
+
+          ensure "liblcms2.2.dylib"
+          ensure "libhwy.1.dylib"
+          ensure "libbrotlidec.1.dylib"
+          ensure "libbrotlicommon.1.dylib"
+          ensure "libbrotlienc.1.dylib"
+
+          # Réécrit toute référence absolue vers ces libs, dans toutes les dylibs du bundle
+          fix_refs() {
+            local HOLDER="$1"
+            for ABS in \
+              "$BREW_PREFIX/opt/little-cms2/lib/liblcms2.2.dylib" \
+              "$BREW_PREFIX/opt/highway/lib/libhwy.1.dylib" \
+              "$BREW_PREFIX/opt/brotli/lib/libbrotlidec.1.dylib" \
+              "$BREW_PREFIX/opt/brotli/lib/libbrotlicommon.1.dylib" \
+              "$BREW_PREFIX/opt/brotli/lib/libbrotlienc.1.dylib" \
+              "$BREW_PREFIX/lib/liblcms2.2.dylib" \
+              "$BREW_PREFIX/lib/libhwy.1.dylib" \
+              "$BREW_PREFIX/lib/libbrotlidec.1.dylib" \
+              "$BREW_PREFIX/lib/libbrotlicommon.1.dylib" \
+              "$BREW_PREFIX/lib/libbrotlienc.1.dylib" \
+            ; do
+              base="$(basename "$ABS")"
+              if otool -L "$HOLDER" | awk 'NR>1{print $1}' | grep -q "$ABS"; then
+                echo "🔧 $(basename "$HOLDER"): $base ← Frameworks"
+                install_name_tool -change "$ABS" "@executable_path/../Frameworks/$base" "$HOLDER" || true
+              fi
+            done
+          }
+
+          for F in "$DEST"/*.dylib; do
+            [ -f "$F" ] && fix_refs "$F"
+          done
+          # et l'exécutable principal
+          fix_refs "$APP_PATH/Contents/MacOS/OpenFunscripter"
+
+          echo "✅ JXL deps relinked."
+
       - name: Verify & list Frameworks
         shell: bash
         run: |
