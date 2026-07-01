@@ -1,0 +1,605 @@
+name: CMake (macOS Apple Silicon — mpv via Homebrew + vendoring complet)
+
+on:
+  workflow_dispatch:
+  push:
+  pull_request:
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  macos:
+    runs-on: macos-15   # Runner Apple Silicon (arm64) natif
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0
+
+      - name: Show architecture
+        run: |
+          echo "uname -m: $(uname -m)"
+          sysctl -n machdep.cpu.brand_string || true
+          sw_vers
+
+      - name: Install base dependencies (with mpv)
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew update || true
+          # Install mpv + typical deps; do NOT silence errors here
+          brew install cmake pkg-config ffmpeg libass zimg glib pcre2 libplacebo mpv || true
+          echo "== Brew list =="
+          brew list --versions ffmpeg mpv libass zimg glib pcre2 libplacebo || true
+
+      - name: Ensure libmpv present (debug)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          echo "BREW_PREFIX=$BREW_PREFIX"
+
+          echo "Listing possible mpv libs:"
+          ls -la "$BREW_PREFIX/opt/mpv/lib" 2>/dev/null || true
+          ls -la "$BREW_PREFIX/lib/libmpv*" 2>/dev/null || true
+          ls -la "$BREW_PREFIX/Cellar/mpv"*/lib/libmpv*.dylib 2>/dev/null || true
+
+          # Find .dylib
+          LIBMPV_PATH="$(find "$BREW_PREFIX/Cellar/mpv" -type f -name 'libmpv*.dylib' 2>/dev/null | head -n1 || true)"
+          if [ -z "$LIBMPV_PATH" ]; then
+            # Try opt/lib
+            LIBMPV_PATH="$(ls "$BREW_PREFIX/opt/mpv/lib/libmpv*.dylib" 2>/dev/null | head -n1 || true)"
+          fi
+          if [ -z "$LIBMPV_PATH" ]; then
+            LIBMPV_PATH="$(ls "$BREW_PREFIX/lib/libmpv*.dylib" 2>/dev/null | head -n1 || true)"
+          fi
+
+          echo "Candidate LIBMPV_PATH = '${LIBMPV_PATH:-<none>}'"
+
+          if [ -z "$LIBMPV_PATH" ] || [ ! -f "$LIBMPV_PATH" ]; then
+            echo "❌ libmpv*.dylib introuvable après debug listing."
+            exit 1
+          fi
+
+          # ✅ Correction : pas de 'stat' ici, on garde le chemin brut
+          LIBMPV_REAL="$LIBMPV_PATH"
+          echo "✅ Using LIBMPV_PATH=$LIBMPV_REAL"
+          echo "LIBMPV_PATH=$LIBMPV_REAL" >> "$GITHUB_ENV"
+
+      - name: Clean previous builds
+        run: rm -rf build bin CMakeFiles CMakeCache.txt || true
+
+      # === Configure/Build en arm64 natif ===
+      - name: Configure CMake (Apple Silicon arm64)
+        run: |
+          set -euo pipefail
+          HB_PREFIX="$(brew --prefix)"
+          echo "Homebrew prefix: $HB_PREFIX"
+          export PKG_CONFIG_PATH="$HB_PREFIX/lib/pkgconfig:$HB_PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}"
+          cmake -S . -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0
+
+      - name: Build OFS (Apple Silicon)
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --target OpenFunscripter -j
+
+      # === Localiser l'app ===
+      - name: Locate app bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build -type d -name 'OpenFunscripter.app' -print -quit || true)"
+          if [ -z "$APP_PATH" ]; then
+            APP_PATH="$(find . -maxdepth 5 -type d -name 'OpenFunscripter.app' -print -quit || true)"
+          fi
+          if [ -z "$APP_PATH" ]; then
+            echo "OpenFunscripter.app introuvable"; exit 1
+          fi
+          echo "APP_PATH=$APP_PATH" >> "$GITHUB_ENV"
+          echo "Found: $APP_PATH"
+
+      - name: Vendor libmpv and ALL Homebrew deps into app (robust copy + @rpath)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          echo "✅ Root dylib: $LIBMPV_PATH"
+          otool -L "$LIBMPV_PATH" || true
+
+          # --- helpers ---
+          get_rpaths() {
+            # Liste les RPATH d'un binaire/dylib
+            otool -l "$1" | awk '
+              $1=="cmd" && $2=="LC_RPATH" {r=1; next}
+              r && $1=="path" {print $2; r=0}
+            ' || true
+          }
+
+          resolve_dep_path() {
+            # $1 = holder (fichier qui référence), $2 = dep (peut être absolu, @rpath/..., @loader_path/..., @executable_path/...)
+            local HOLDER="$1"
+            local DEP="$2"
+            local BASE="$(basename "$DEP")"
+
+            case "$DEP" in
+              /*)
+                # chemin absolu : si existe on le prend
+                [[ -f "$DEP" ]] && { echo "$DEP"; return 0; }
+                ;;
+              @loader_path/*)
+                local HP="$(dirname "$HOLDER")"
+                local CAND="${DEP/@loader_path/$HP}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                ;;
+              @executable_path/*)
+                # pour des deps référencées depuis l'exécutable
+                local EXE_DIR="$APP_PATH/Contents/MacOS"
+                local CAND="${DEP/@executable_path/$EXE_DIR}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                ;;
+              @rpath/*)
+                # essaie chaque RPATH du holder
+                while IFS= read -r RP; do
+                  [[ -z "$RP" ]] && continue
+                  local CAND="$RP/$BASE"
+                  [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                done < <(get_rpaths "$HOLDER")
+                # fallback: cherche sous Homebrew
+                local FOUND
+                FOUND="$(/usr/bin/find "$BREW_PREFIX" \( -path "$BREW_PREFIX/Cellar/*/lib" -o -path "$BREW_PREFIX/opt/*/lib" -o -path "$BREW_PREFIX/lib" \) -maxdepth 1 -name "$BASE" 2>/dev/null | head -n1 || true)"
+                [[ -n "$FOUND" && -f "$FOUND" ]] && { echo "$FOUND"; return 0; }
+                ;;
+            esac
+
+            # Dernier filet: cherche par nom partout sous Homebrew/lib
+            local ANY
+            ANY="$(/usr/bin/find "$BREW_PREFIX" -type f -name "$BASE" 2>/dev/null | head -n1 || true)"
+            [[ -n "$ANY" && -f "$ANY" ]] && { echo "$ANY"; return 0; }
+
+            # Rien trouvé
+            echo ""
+            return 1
+          }
+
+          copy_one() {
+            local SRC="$1"
+            local BASE="$(basename "$SRC")"
+            local TGT="$DEST/$BASE"
+            if [[ ! -f "$TGT" && -f "$SRC" ]]; then
+              echo "📦 Copying $BASE"
+              cp "$SRC" "$TGT"
+              chmod 644 "$TGT" || true
+              install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT"
+            fi
+          }
+
+          deps_of() {
+            # Liste brute des deps (y compris @rpath / @loader_path / absolus)
+            otool -L "$1" | awk 'NR>1 {print $1}' || true
+          }
+
+          relink() {
+            local HOLDER="$1"
+            local OLDREF="$2"
+            local BASE="$(basename "$OLDREF")"
+            if [[ -f "$HOLDER" ]]; then
+              install_name_tool -change "$OLDREF" "@executable_path/../Frameworks/$BASE" "$HOLDER" || true
+            fi
+          }
+
+          # --- BFS ---
+          queue=("$LIBMPV_PATH")
+          declare -a copied=()
+
+          while [[ ${#queue[@]} -gt 0 ]]; do
+            SRC="${queue[0]}"
+            queue=("${queue[@]:1}")
+            [[ -f "$SRC" ]] || continue
+
+            set +u
+            if [[ " ${copied[*]-} " == *" $SRC "* ]]; then
+              set -u
+              continue
+            fi
+            set -u
+
+            copied+=("$SRC")
+            copy_one "$SRC"
+
+            # Pour chaque dep (absolue ou @rpath...), résout le vrai chemin, relink et enfile
+            while IFS= read -r REF; do
+              [[ -z "$REF" ]] && continue
+
+              # On ne vendorise pas les libs système Apple (/System,/usr/lib, frameworks…)
+              case "$REF" in
+                /System/*|/usr/lib/*|/Library/Frameworks/*|/System/Library/*) continue ;;
+              esac
+
+              REAL="$(resolve_dep_path "$SRC" "$REF" || true)"
+              if [[ -n "$REAL" && -f "$REAL" ]]; then
+                relink "$DEST/$(basename "$SRC")" "$REF"
+                queue+=("$REAL")
+              fi
+            done < <(deps_of "$SRC")
+          done
+
+          # Relink l’exécutable principal vers la libmpv copiée
+          MPV_BASE="$(basename "$LIBMPV_PATH")"
+          install_name_tool -change "$LIBMPV_PATH" "@executable_path/../Frameworks/$MPV_BASE" "$APP_PATH/Contents/MacOS/OpenFunscripter"
+
+          echo "📂 Final Frameworks content:"
+          ls -la "$DEST" || true
+
+          COUNT=$(ls "$DEST" | wc -l | tr -d ' ')
+          if [[ "$COUNT" -eq 0 ]]; then
+            echo "❌ Aucune dylib copiée dans Frameworks — vendoring a échoué."
+            exit 1
+          else
+            echo "✅ $COUNT fichiers copiés dans Frameworks."
+          fi
+
+      - name: Ensure JPEG-XL & WebP libs are embedded (libjxl*, libjxl_cms*, libsharpyuv*, libwebp*)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          # Installe/assure les kegs qui portent ces libs
+          brew install jpeg-xl webp || true
+
+          copy_glob() {
+            local pattern="$1"
+            # copie toutes les occurrences trouvées (opt/, Cellar/, lib/)
+            /usr/bin/find "$BREW_PREFIX/opt" "$BREW_PREFIX/Cellar" "$BREW_PREFIX/lib" \
+              -maxdepth 4 -type f -name "$pattern" 2>/dev/null \
+            | while IFS= read -r f; do
+                [ -f "$f" ] || continue
+                b="$(basename "$f")"
+                if [ ! -f "$DEST/$b" ]; then
+                  echo "📦 Copying $b"
+                  cp "$f" "$DEST/$b"
+                  chmod 644 "$DEST/$b" || true
+                  install_name_tool -id "@executable_path/../Frameworks/$b" "$DEST/$b" || true
+                fi
+              done
+          }
+
+          # JPEG-XL
+          copy_glob "libjxl*.dylib"
+          copy_glob "libjxl_cms*.dylib"
+
+          # WebP (au cas où)
+          copy_glob "libsharpyuv*.dylib"
+          copy_glob "libwebp*.dylib"
+          copy_glob "libwebpmux*.dylib"
+          copy_glob "libwebpdemux*.dylib"
+
+          echo "📂 Frameworks after JXL/WebP ensure:"
+          ls -la "$DEST" | grep -E 'libjxl|libjxl_cms|libwebp|sharpyuv' || true
+
+      - name: Force-copy libsharpyuv from webp keg (hard fail if missing)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          echo "🔎 webp prefix: $(brew --prefix webp || true)"
+          echo "🔎 Listing webp lib dir:"
+          ls -la "$(brew --prefix webp)/lib" 2>/dev/null || true
+
+          # Cherche libsharpyuv*.dylib en priorité dans le keg webp, sinon partout sous Homebrew
+          SHARPY="$(/usr/bin/find "$(brew --prefix webp)/lib" -maxdepth 1 -type f -name 'libsharpyuv*.dylib' 2>/dev/null | head -n1 || true)"
+          if [ -z "$SHARPY" ]; then
+            SHARPY="$(/usr/bin/find "$BREW_PREFIX" -type f -name 'libsharpyuv*.dylib' 2>/dev/null | head -n1 || true)"
+          fi
+
+          echo "Candidate libsharpyuv: ${SHARPY:-<none>}"
+          if [ -z "$SHARPY" ] || [ ! -f "$SHARPY" ]; then
+            echo "❌ libsharpyuv introuvable. Essaye: brew reinstall webp"
+            brew reinstall webp
+            SHARPY="$(/usr/bin/find "$(brew --prefix webp)/lib" -maxdepth 1 -type f -name 'libsharpyuv*.dylib' 2>/dev/null | head -n1 || true)"
+          fi
+
+          if [ -z "$SHARPY" ] || [ ! -f "$SHARPY" ]; then
+            echo "❌ Impossible de localiser libsharpyuv*.dylib après réinstall webp."
+            exit 1
+          fi
+
+          BASENAME="$(basename "$SHARPY")"
+          echo "📦 Copying $BASENAME"
+          cp "$SHARPY" "$DEST/$BASENAME"
+          chmod 644 "$DEST/$BASENAME" || true
+          install_name_tool -id "@executable_path/../Frameworks/$BASENAME" "$DEST/$BASENAME" || true
+
+          echo "📂 Frameworks now contains:"
+          ls -la "$DEST" | grep -E 'libsharpyuv|libwebp' || true
+
+      - name: Create ABI compatibility symlinks (*.MAJOR.dylib → *.MAJOR.MINOR.dylib)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$APP_PATH/Contents/Frameworks"
+          cd "$DEST"
+
+          make_link() {
+            local real="$1"       # ex: libsharpyuv.0.1.2.dylib
+            # extrait "base.MAJOR" -> libsharpyuv.0
+            local base="$(echo "$real" | sed -E 's/\.([0-9]+)\.([0-9]+)\.dylib$//')"   || true
+            local major="$(echo "$real" | sed -nE 's/.*\.([0-9]+)\.([0-9]+)\.dylib$/\1/p')" || true
+            [ -n "$base" ] && [ -n "$major" ] || return 0
+            local link="${base}.${major}.dylib"
+            if [ -f "$real" ] && [ ! -e "$link" ]; then
+              echo "🔗 ln -s $real  ->  $link"
+              ln -s "$real" "$link"
+            fi
+          }
+
+          # symlinks pour toutes les libs versionnées X.Y: lib*.MAJOR.MINOR.dylib
+          for f in lib*.[0-9]*.[0-9]*.dylib; do
+            [ -f "$f" ] || continue
+            make_link "$f"
+          done
+
+          echo "📂 After symlink pass:"
+          ls -la | grep -E 'libjxl|libjxl_cms|libwebp|sharpyuv' || true
+
+      - name: Rewrite any remaining @rpath → Frameworks (all dylibs + exe)
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$APP_PATH/Contents/Frameworks"
+
+          fix_one() {
+            local HOLDER="$1"
+            # Réécrit toute ref @rpath/<lib> -> @executable_path/../Frameworks/<lib>
+            while IFS= read -r REF; do
+              [ -z "$REF" ] && continue
+              base="$(basename "$REF")"
+              if [ -f "$DEST/$base" ]; then
+                echo "🔧 $(basename "$HOLDER"): @rpath → $base"
+                install_name_tool -change "$REF" "@executable_path/../Frameworks/$base" "$HOLDER" || true
+              fi
+            done < <(otool -L "$HOLDER" | awk 'NR>1{print $1}' | grep '^@rpath/' || true)
+          }
+
+          # Corrige toutes les dylibs vendorisées
+          for F in "$DEST"/*.dylib; do
+            [ -f "$F" ] && fix_one "$F"
+          done
+          # Et l’exécutable principal
+          fix_one "$APP_PATH/Contents/MacOS/OpenFunscripter"
+
+          echo "✅ @rpath cleaned."
+
+      - name: Close over all Frameworks deps (BFS on every dylib)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BREW_PREFIX="$(brew --prefix)"
+          DEST="$APP_PATH/Contents/Frameworks"
+          mkdir -p "$DEST"
+
+          # --- Initial queue: all dylibs already in Frameworks (bash 3 compatible) ---
+          queue=()
+          while IFS= read -r f; do
+            [ -n "$f" ] && queue+=("$f")
+          done < <(find "$DEST" -maxdepth 1 -type f -name "*.dylib" 2>/dev/null || true)
+
+          # Seen set
+          seen=()
+          in_seen() { local x="$1"; [[ " ${seen[*]-} " == *" $x "* ]]; }
+          mark_seen() { seen+=("$1"); }
+
+          copy_one() {
+            local SRC="$1"
+            local BASE="$(basename "$SRC")"
+            local TGT="$DEST/$BASE"
+            if [[ ! -f "$TGT" && -f "$SRC" ]]; then
+              echo "📦 Copying $BASE"
+              cp "$SRC" "$TGT"
+              chmod 644 "$TGT" || true
+              install_name_tool -id "@executable_path/../Frameworks/$BASE" "$TGT" || true
+            fi
+          }
+
+          get_rpaths() {
+            otool -l "$1" | awk '$1=="cmd"&&$2=="LC_RPATH"{r=1;next} r&&$1=="path"{print $2;r=0}' || true
+          }
+
+          resolve_dep() {
+            local HOLDER="$1"; local REF="$2"; local BASE="$(basename "$REF")"
+            case "$REF" in
+              /*)
+                [[ -f "$REF" ]] && { echo "$REF"; return 0; } ;;
+              @loader_path/*)
+                local HP="$(dirname "$HOLDER")"; local CAND="${REF/@loader_path/$HP}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; } ;;
+              @executable_path/*)
+                local EXE="$APP_PATH/Contents/MacOS"; local CAND="${REF/@executable_path/$EXE}"
+                [[ -f "$CAND" ]] && { echo "$CAND"; return 0; } ;;
+              @rpath/*)
+                while IFS= read -r RP; do
+                  [[ -z "$RP" ]] && continue
+                  local CAND="$RP/$BASE"
+                  [[ -f "$CAND" ]] && { echo "$CAND"; return 0; }
+                done < <(get_rpaths "$HOLDER")
+                # fallback Homebrew
+                local F; F="$(/usr/bin/find "$BREW_PREFIX" \( -path "$BREW_PREFIX/opt/*/lib" -o -path "$BREW_PREFIX/Cellar/*/lib" -o -path "$BREW_PREFIX/lib" \) -maxdepth 1 -name "$BASE" 2>/dev/null | head -n1 || true)"
+                [[ -n "$F" && -f "$F" ]] && { echo "$F"; return 0; } ;;
+            esac
+            # dernier filet: recherche globale sous Homebrew
+            local ANY; ANY="$(/usr/bin/find "$BREW_PREFIX" -type f -name "$BASE" 2>/dev/null | head -n1 || true)"
+            [[ -n "$ANY" && -f "$ANY" ]] && { echo "$ANY"; return 0; }
+            echo ""; return 1
+          }
+
+          deps_of() { otool -L "$1" | awk 'NR>1{print $1}'; }
+
+          relink_to_bundle() {
+            local HOLDER="$1"; local OLD="$2"; local BASE="$(basename "$OLD")"
+            if [[ -f "$HOLDER" ]]; then
+              install_name_tool -change "$OLD" "@executable_path/../Frameworks/$BASE" "$HOLDER" || true
+            fi
+          }
+
+          # BFS over all dylibs already in Frameworks
+          while [[ ${#queue[@]} -gt 0 ]]; do
+            ITEM="${queue[0]}"; queue=("${queue[@]:1}")
+            [[ -f "$ITEM" ]] || continue
+            set +u
+            if [[ " ${seen[*]-} " == *" $ITEM "* ]]; then
+              set -u
+              continue
+            fi
+            set -u
+            mark_seen "$ITEM"
+
+            while IFS= read -r REF; do
+              [[ -z "$REF" ]] && continue
+              case "$REF" in
+                /System/*|/usr/lib/*|/Library/Frameworks/*|/System/Library/*) continue ;;
+              esac
+
+              REAL="$(resolve_dep "$ITEM" "$REF" || true)"
+              [[ -z "$REAL" || ! -f "$REAL" ]] && continue
+
+              case "$REAL" in
+                "$BREW_PREFIX"/*)
+                  copy_one "$REAL"
+                  relink_to_bundle "$ITEM" "$REF"
+                  NEW="$DEST/$(basename "$REAL")"
+                  queue+=("$NEW")
+                  ;;
+              esac
+            done < <(deps_of "$ITEM")
+          done
+
+          echo "📂 Frameworks after close-over pass:"
+          ls -la "$DEST" || true
+
+      - name: Force-fix known JXL deps (lcms2, highway, brotli) to bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          DEST="$APP_PATH/Contents/Frameworks"
+          BREW_PREFIX="$(brew --prefix)"
+
+          # Vendorise explicitement ces libs si absentes
+          ensure() {
+            local name="$1" # ex: liblcms2.2.dylib
+            local found=""
+            if [ ! -f "$DEST/$name" ]; then
+              found="$(/usr/bin/find "$BREW_PREFIX" -type f -name "$name" 2>/dev/null | head -n1 || true)"
+              if [ -n "$found" ]; then
+                echo "📦 Copying $name"
+                cp "$found" "$DEST/$name"
+                chmod 644 "$DEST/$name" || true
+                install_name_tool -id "@executable_path/../Frameworks/$name" "$DEST/$name" || true
+              fi
+            fi
+          }
+
+          ensure "liblcms2.2.dylib"
+          ensure "libhwy.1.dylib"
+          ensure "libbrotlidec.1.dylib"
+          ensure "libbrotlicommon.1.dylib"
+          ensure "libbrotlienc.1.dylib"
+
+          # Réécrit toute référence absolue vers ces libs, dans toutes les dylibs du bundle
+          fix_refs() {
+            local HOLDER="$1"
+            for ABS in \
+              "$BREW_PREFIX/opt/little-cms2/lib/liblcms2.2.dylib" \
+              "$BREW_PREFIX/opt/highway/lib/libhwy.1.dylib" \
+              "$BREW_PREFIX/opt/brotli/lib/libbrotlidec.1.dylib" \
+              "$BREW_PREFIX/opt/brotli/lib/libbrotlicommon.1.dylib" \
+              "$BREW_PREFIX/opt/brotli/lib/libbrotlienc.1.dylib" \
+              "$BREW_PREFIX/lib/liblcms2.2.dylib" \
+              "$BREW_PREFIX/lib/libhwy.1.dylib" \
+              "$BREW_PREFIX/lib/libbrotlidec.1.dylib" \
+              "$BREW_PREFIX/lib/libbrotlicommon.1.dylib" \
+              "$BREW_PREFIX/lib/libbrotlienc.1.dylib" \
+            ; do
+              base="$(basename "$ABS")"
+              if otool -L "$HOLDER" | awk 'NR>1{print $1}' | grep -q "$ABS"; then
+                echo "🔧 $(basename "$HOLDER"): $base ← Frameworks"
+                install_name_tool -change "$ABS" "@executable_path/../Frameworks/$base" "$HOLDER" || true
+              fi
+            done
+          }
+
+          for F in "$DEST"/*.dylib; do
+            [ -f "$F" ] && fix_refs "$F"
+          done
+          # et l'exécutable principal
+          fix_refs "$APP_PATH/Contents/MacOS/OpenFunscripter"
+
+          echo "✅ JXL deps relinked."
+
+      - name: Verify & list Frameworks
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "📂 Listing $APP_PATH/Contents/Frameworks:"
+          ls -la "$APP_PATH/Contents/Frameworks" || true
+          echo ""
+          echo "🔎 Checking for Homebrew absolute paths..."
+          OFFENDERS=0
+          check_one() {
+            local F="$1"
+            if otool -L "$F" | awk 'NR>1{print $1}' | grep -q "^$(brew --prefix)/"; then
+              echo "❌ Still links to Homebrew: $F"
+              otool -L "$F" | awk 'NR>1{print $1}' | grep "^$(brew --prefix)/"
+              OFFENDERS=1
+            fi
+          }
+          check_one "$APP_PATH/Contents/MacOS/OpenFunscripter"
+          for F in "$APP_PATH/Contents/Frameworks/"*.dylib; do
+            [ -f "$F" ] && check_one "$F"
+          done
+          if [ $OFFENDERS -ne 0 ]; then
+            echo "Certaines libs pointent encore vers Homebrew — voir la liste ci-dessus."; exit 1
+          else
+            echo "✅ Aucun chemin Homebrew absolu restant. Bundle autonome."
+          fi
+
+      - name: Create launcher (set DYLD_FALLBACK_LIBRARY_PATH)
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN_DIR="$APP_PATH/Contents/MacOS"
+          REAL="$BIN_DIR/OpenFunscripter.real"
+          mv "$BIN_DIR/OpenFunscripter" "$REAL" || true
+          {
+            echo '#!/bin/bash'
+            echo 'APPDIR="$(cd "$(dirname "$0")" && pwd)"'
+            echo 'export DYLD_FALLBACK_LIBRARY_PATH="$APPDIR/../Frameworks${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"'
+            echo 'exec "$APPDIR/OpenFunscripter.real" "$@"'
+          } > "$BIN_DIR/OpenFunscripter"
+          chmod +x "$BIN_DIR/OpenFunscripter"
+
+      - name: Inspect binary arch (should be arm64)
+        run: |
+          BIN="$APP_PATH/Contents/MacOS/OpenFunscripter"
+          file "$BIN" || true
+          otool -hv "$BIN" | head -n1 || true
+
+      - name: Package app (zip)
+        run: ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" "OpenFunscripter-macOS-AppleSilicon.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OFS-macOS-AppleSilicon
+          path: OpenFunscripter-macOS-AppleSilicon.zip
+          retention-days: 14
